@@ -34,7 +34,7 @@ from pymongo import ASCENDING, MongoClient
 
 from mesh.lib import meta_model_client
 from mesh.orchestrator import trip_recap, upload_links, wayfinder_tools
-from mesh.orchestrator.letsfg_tools import book_flight_letsfg
+from mesh.orchestrator.letsfg_tools import book_flight
 
 MONGO_URL = os.environ.get('ADIYAN_MONGO_URL', 'mongodb://localhost:27017')
 MONGO_DB_NAME = os.environ.get('ADIYAN_MONGO_DB_DATA', 'adiyan')
@@ -293,13 +293,21 @@ async def _handle_pending_booking(identity_key: str, text: str, pending: Dict[st
         AGENT_ID, 'parse_passenger_name', f'Split this into a given name and family name: "{text}"', _PassengerName,
     )
     contact_email = identity_key.lstrip('+') + '@wayfinder.sandbox'
-    result = await book_flight_letsfg.ainvoke({
-        'search_id': pending['search_id'], 'offer_id': pending['offer_id'],
-        'given_name': name.given_name, 'family_name': name.family_name, 'contact_email': contact_email,
-        'adults': pending.get('adults', 1), 'children': pending.get('children', 0),
-    })
+    result = await book_flight(
+        pending['search_id'], pending['offer_id'], name.given_name, name.family_name, contact_email,
+        pending.get('adults', 1), pending.get('children', 0),
+    )
     _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {'status': 'booked'}})
-    return result
+    reply_text = result['text']
+    if result['state'] == 'completed' and result.get('charged_amount') is not None:
+        # A real, confirmed figure - safe to add to the running trip cost
+        # (trip_recap.add_expense's own docstring on why only confirmed
+        # numbers ever land there, never an estimate).
+        trip_recap.add_expense(identity_key, f'Flight - {pending["summary"]}', result['charged_amount'], result['currency'], 'flight_booking')
+        running = trip_recap.get_running_cost(identity_key)
+        totals = ', '.join(f'{amt:.2f} {cur}' for cur, amt in running['totals_by_currency'].items())
+        reply_text += f'\n\nRunning trip cost so far: {totals}'
+    return reply_text
 
 
 class _PublishDecision(BaseModel):

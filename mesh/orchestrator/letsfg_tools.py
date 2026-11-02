@@ -125,18 +125,27 @@ def _sandbox_placeholder_fields() -> dict:
 
 
 @tool
-async def book_flight_letsfg(
+async def book_flight(
     search_id: str, offer_id: str, given_name: str, family_name: str, contact_email: str,
     adults: int = 1, children: int = 0,
-) -> str:
-    """Book a specific LetsFG offer - ONLY call this after the customer
-    has explicitly confirmed they want THIS exact offer booked (price and
-    route stated back to them first). `search_id`/`offer_id` must come
-    from a prior search_flights_letsfg call in the same session; an offer
-    is only bookable inside its own search. `adults`/`children` MUST
-    match the exact party size that offer was searched for - LetsFG
-    rejects a mismatched party (party_mismatch) rather than silently
-    booking the wrong number of seats.
+) -> dict:
+    """The real booking call, returning the full structured result (state,
+    pnr, charged_amount, currency, plus a ready-to-send `text` summary) -
+    not just text, so a caller like wayfinder_session.py can record a real
+    expense from charged_amount without parsing prose. `book_flight_letsfg`
+    below is the thin @tool-decorated wrapper around this that returns
+    just the text, kept for symmetry with the other tools even though it's
+    never in TOOLS (see this module's own docstring on why booking is
+    never model-chosen).
+
+    ONLY call this after the customer has explicitly confirmed they want
+    THIS exact offer booked (price and route stated back to them first).
+    `search_id`/`offer_id` must come from a prior search_flights_letsfg
+    call in the same session; an offer is only bookable inside its own
+    search. `adults`/`children` MUST match the exact party size that
+    offer was searched for - LetsFG rejects a mismatched party
+    (party_mismatch) rather than silently booking the wrong number of
+    seats.
 
     In sandbox mode (default) this simulates a real booking end to end -
     same states and timings as production, no money moves, no real
@@ -161,14 +170,14 @@ async def book_flight_letsfg(
     try:
         accepted = await _request('POST', '/flights/book', body)
     except Exception as e:
-        return f'book_flight_letsfg failed: {e}'
+        return {'state': 'error', 'text': f'book_flight_letsfg failed: {e}'}
     booking_id = accepted.get('booking_id')
     if not booking_id:
-        return f'LetsFG did not return a booking_id: {accepted}'
+        return {'state': 'error', 'text': f'LetsFG did not return a booking_id: {accepted}'}
     return await _poll_booking(booking_id)
 
 
-async def _poll_booking(booking_id: str, max_polls: int = 5, interval_seconds: float = 2.0) -> str:
+async def _poll_booking(booking_id: str, max_polls: int = 5, interval_seconds: float = 2.0) -> dict:
     """Bounded poll, not the full production wait (a real booking takes
     4-11 minutes; this tool call can't block a WhatsApp reply that long).
     Returns whatever terminal/non-terminal state exists when the bound is
@@ -180,18 +189,35 @@ async def _poll_booking(booking_id: str, max_polls: int = 5, interval_seconds: f
         try:
             status = await _request('GET', f'/flights/bookings/{booking_id}')
         except Exception as e:
-            return f'book_flight_letsfg: booking accepted (id {booking_id}) but polling status failed: {e}'
+            return {'state': 'error', 'text': f'book_flight_letsfg: booking accepted (id {booking_id}) but polling status failed: {e}'}
         if status.get('terminal'):
             break
         await asyncio.sleep(interval_seconds)
     state = status.get('state', 'unknown')
+    charged_amount = status.get('charged_amount')
+    currency = status.get('currency')
     if state == 'completed':
-        return f"Booking confirmed - PNR {status.get('pnr', '?')}, {status.get('charged_amount', '?')} {status.get('currency', '')} charged."
-    if state == 'failed':
-        return f"Booking failed: {status.get('failure_reason') or status.get('decline_message') or 'no reason given'}. Nothing was charged."
-    if state == 'needs_attention':
-        return f'Booking needs manual review at LetsFG (booking_id {booking_id}). Nothing further charged until resolved.'
-    return f'Booking is still in progress (state: {state}, booking_id {booking_id}) - check back shortly.'
+        text = f"Booking confirmed - PNR {status.get('pnr', '?')}, {charged_amount} {currency} charged."
+    elif state == 'failed':
+        text = f"Booking failed: {status.get('failure_reason') or status.get('decline_message') or 'no reason given'}. Nothing was charged."
+    elif state == 'needs_attention':
+        text = f'Booking needs manual review at LetsFG (booking_id {booking_id}). Nothing further charged until resolved.'
+    else:
+        text = f'Booking is still in progress (state: {state}, booking_id {booking_id}) - check back shortly.'
+    return {'state': state, 'text': text, 'charged_amount': charged_amount, 'currency': currency, 'pnr': status.get('pnr'), 'booking_id': booking_id}
+
+
+@tool
+async def book_flight_letsfg(
+    search_id: str, offer_id: str, given_name: str, family_name: str, contact_email: str,
+    adults: int = 1, children: int = 0,
+) -> str:
+    """Book a specific LetsFG offer - see book_flight's own (fuller)
+    docstring for the real contract. This is the thin text-returning
+    wrapper, kept for symmetry with the other @tool functions even though
+    it is never added to TOOLS (see this module's own top docstring)."""
+    result = await book_flight(search_id, offer_id, given_name, family_name, contact_email, adults, children)
+    return result['text']
 
 
 LETSFG_TOOLS = [search_flights_letsfg, book_flight_letsfg]

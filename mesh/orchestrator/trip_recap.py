@@ -36,6 +36,7 @@ each new push after that is live in well under a minute.
 """
 import base64
 import html as html_escape
+import io
 import logging
 import os
 import re
@@ -57,6 +58,7 @@ MONGO_URL = os.environ.get('ADIYAN_MONGO_URL', 'mongodb://localhost:27017')
 MONGO_DB_NAME = os.environ.get('ADIYAN_MONGO_DB_DATA', 'adiyan')
 PHOTOS_COLLECTION = 'wayfinder_trip_photos'
 RECAPS_COLLECTION = 'wayfinder_trip_recaps'
+EXPENSES_COLLECTION = 'wayfinder_trip_expenses'
 
 PHOTO_DIR = Path(os.environ.get('WAYFINDER_PHOTO_DIR', str(Path.home() / '.Adiyan' / 'wayfinder_photos')))
 
@@ -77,9 +79,68 @@ def _db():
     return _client[MONGO_DB_NAME]
 
 
+def add_expense(phone: str, label: str, amount: float, currency: str, source: str) -> None:
+    """Running trip-cost tracking - deliberately only ever called with a
+    real, already-known number (a booking's own charged_amount from
+    LetsFG), never a new model call to estimate or guess an expense.
+    Keeping this to confirmed, structured figures is what makes
+    get_running_cost's total trustworthy to state as a fact, the same
+    reasoning budget_engine.py's trustworthy flag already applies to the
+    statement-derived budget signal."""
+    _db()[EXPENSES_COLLECTION].insert_one({
+        'phone': phone, 'label': label, 'amount': amount, 'currency': currency,
+        'source': source, 'recorded_at': datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def get_running_cost(phone: str) -> Dict[str, Any]:
+    """Grouped by currency, never summed across currencies (a EUR flight
+    and a USD hotel aren't one number without a conversion rate this
+    module has no business inventing)."""
+    entries = list(_db()[EXPENSES_COLLECTION].find({'phone': phone}, {'_id': 0}).sort('recorded_at', 1))
+    totals: Dict[str, float] = {}
+    for e in entries:
+        totals[e['currency']] = totals.get(e['currency'], 0.0) + e['amount']
+    return {'entries': entries, 'totals_by_currency': totals}
+
+
+def _format_running_cost(phone: str) -> str:
+    cost = get_running_cost(phone)
+    if not cost['entries']:
+        return '(no confirmed expenses yet)'
+    lines = [f"- {e['label']}: {e['amount']} {e['currency']}" for e in cost['entries']]
+    totals = ', '.join(f'{amt:.2f} {cur}' for cur, amt in cost['totals_by_currency'].items())
+    return '\n'.join(lines) + f'\nRunning total: {totals}'
+
+
 class PhotoAnalysis(BaseModel):
     caption: str = Field(description='A short, warm, one-sentence caption describing what is actually in this photo.')
     looks_like_transit_selfie: bool = Field(description="True only if this specifically looks like a selfie or photo taken ON a plane, train, or at a departure gate/platform, suggesting a journey home. False for any other photo (a beach, a meal, a hotel room, a group photo on land, etc).")
+
+
+def _read_exif_capture_time(content: bytes) -> Optional[str]:
+    """When the photo was actually TAKEN, not uploaded - read straight
+    from the file's own EXIF DateTimeOriginal (falling back to the plain
+    DateTime tag), deterministic, no model call. Most phone cameras write
+    this automatically; a screenshot or a downloaded/re-saved image often
+    has none, which is exactly why this returns None rather than
+    guessing - uploaded_at is always there as a fallback for ordering."""
+    try:
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        img = Image.open(io.BytesIO(content))
+        exif = img.getexif()
+        if not exif:
+            return None
+        tags = {TAGS.get(k, k): v for k, v in exif.items()}
+        raw = tags.get('DateTimeOriginal') or tags.get('DateTime')
+        if not raw:
+            return None
+        # EXIF's own format: "YYYY:MM:DD HH:MM:SS"
+        dt = datetime.strptime(raw, '%Y:%m:%d %H:%M:%S')
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    except Exception:
+        return None
 
 
 async def handle_photo_upload(phone: str, filename: str, content: bytes) -> Dict[str, Any]:
@@ -98,17 +159,32 @@ async def handle_photo_upload(phone: str, filename: str, content: bytes) -> Dict
         'Caption this trip photo in one warm sentence, and say whether it specifically looks like a flight/train/departure selfie suggesting a journey home.',
         filename, content, PhotoAnalysis,
     )
+    captured_at = _read_exif_capture_time(content)
     doc = {
         'phone': phone, 'filename': filename, 'stored_path': str(stored_path),
         'caption': analysis.caption, 'looks_like_transit_selfie': analysis.looks_like_transit_selfie,
         'uploaded_at': datetime.now(timezone.utc).isoformat(),
+        'captured_at': captured_at,
     }
     _db()[PHOTOS_COLLECTION].insert_one(doc)
     return doc
 
 
+def _photo_timeline_date(photo: Dict[str, Any]) -> str:
+    """Prefer the photo's own real capture time over upload time for
+    anything date-sensitive (ordering the memorabilia timeline, matching
+    a transit selfie against the trip's travel_window) - uploaded_at is
+    only ever a fallback for a photo with no EXIF."""
+    return (photo.get('captured_at') or photo['uploaded_at'])
+
+
 def get_photos(phone: str) -> List[Dict[str, Any]]:
-    return list(_db()[PHOTOS_COLLECTION].find({'phone': phone}, {'_id': 0}).sort('uploaded_at', 1))
+    """Ordered by the photo's own real timeline (EXIF capture time where
+    present, upload time otherwise) - sorted in Python, not via Mongo's
+    own .sort(), since the two different date fields can't be mixed into
+    one index-sortable key server-side."""
+    photos = list(_db()[PHOTOS_COLLECTION].find({'phone': phone}, {'_id': 0}))
+    return sorted(photos, key=_photo_timeline_date)
 
 
 class _TripCompletionSignal(BaseModel):
@@ -143,8 +219,8 @@ def detect_photo_completion(phone: str, travel_window_end: Optional[str]) -> boo
     for photo in get_photos(phone):
         if not photo.get('looks_like_transit_selfie'):
             continue
-        uploaded_at = datetime.fromisoformat(photo['uploaded_at']).date()
-        if abs((uploaded_at - end_date).days) <= 2:
+        photo_date = datetime.fromisoformat(_photo_timeline_date(photo)).date()
+        if abs((photo_date - end_date).days) <= 2:
             return True
     return False
 
@@ -186,7 +262,7 @@ def _photo_captions_text(photos: List[Dict[str, Any]]) -> str:
     return '\n'.join(f'{i + 1}. {p["caption"]}' for i, p in enumerate(photos))
 
 
-def _build_html_page(title: str, narrative_html: str, photos: List[Dict[str, Any]]) -> str:
+def _build_html_page(title: str, narrative_html: str, photos: List[Dict[str, Any]], phone: str) -> str:
     """One self-contained HTML file - photos embedded as base64 data
     URIs, not linked separately, so the single file pushed to the repo
     is the whole page; nothing else needs to be served alongside it."""
@@ -199,9 +275,23 @@ def _build_html_page(title: str, narrative_html: str, photos: List[Dict[str, Any
         mime = 'image/jpeg' if photo['filename'].lower().endswith(('.jpg', '.jpeg')) else 'image/png'
         b64 = base64.b64encode(data).decode()
         caption = html_escape.escape(photo['caption'])
-        figures.append(f'<figure><img src="data:{mime};base64,{b64}" alt="{caption}"><figcaption>{caption}</figcaption></figure>')
+        timeline_date = datetime.fromisoformat(_photo_timeline_date(photo)).strftime('%b %-d, %Y')
+        date_badge = html_escape.escape(timeline_date) + (' (from camera)' if photo.get('captured_at') else ' (upload date)')
+        figures.append(f'<figure><img src="data:{mime};base64,{b64}" alt="{caption}"><figcaption>{caption}<br><small>{date_badge}</small></figcaption></figure>')
     gallery = '\n'.join(figures)
     safe_title = html_escape.escape(title)
+
+    # The cost summary is built here, deterministically, from real
+    # recorded expenses - never handed to the model to restate in prose,
+    # where a number could get transcribed wrong. See add_expense's own
+    # docstring for why only confirmed bookings ever land in this total.
+    cost = get_running_cost(phone)
+    cost_html = ''
+    if cost['entries']:
+        rows = ''.join(f"<li>{html_escape.escape(e['label'])}: {e['amount']:.2f} {html_escape.escape(e['currency'])}</li>" for e in cost['entries'])
+        totals = ', '.join(f"{amt:.2f} {html_escape.escape(cur)}" for cur, amt in cost['totals_by_currency'].items())
+        cost_html = f'<section class="cost"><h2>What this trip cost</h2><ul>{rows}</ul><p class="total">Total: {totals}</p></section>'
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{safe_title}</title>
@@ -211,12 +301,16 @@ def _build_html_page(title: str, narrative_html: str, photos: List[Dict[str, Any
   figure {{ margin: 24px 0; }}
   img {{ width: 100%; border-radius: 8px; display: block; }}
   figcaption {{ font-size: 0.9rem; color: #6b6b76; margin-top: 6px; }}
+  section.cost {{ margin-top: 40px; padding: 20px; background: #f4f1ea; border-radius: 8px; }}
+  section.cost h2 {{ font-size: 1.1rem; margin-top: 0; }}
+  section.cost .total {{ font-weight: 600; margin-bottom: 0; }}
   footer {{ margin-top: 48px; font-size: 0.8rem; color: #9a9aa5; }}
 </style></head>
 <body>
 <h1>{safe_title}</h1>
 {narrative_html}
 {gallery}
+{cost_html}
 <footer>Generated by Wayfinder.</footer>
 </body></html>"""
 
@@ -231,7 +325,7 @@ async def generate_recap(phone: str, profile_summary: str) -> Dict[str, Any]:
         _RECAP_PROMPT.format(profile_summary=profile_summary, photo_captions=_photo_captions_text(photos)),
         TripBlog,
     )
-    html_page = _build_html_page(blog.title, blog.narrative_html, photos)
+    html_page = _build_html_page(blog.title, blog.narrative_html, photos, phone)
     doc = {
         'phone': phone, 'title': blog.title, 'html': html_page,
         'photo_count': len(photos), 'status': 'drafted',

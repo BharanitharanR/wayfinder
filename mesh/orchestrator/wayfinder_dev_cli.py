@@ -26,6 +26,13 @@ Commands inside the REPL:
     /reset       - wipe this phone's chat_turns/uploads/links (start clean)
     /usage       - print this process's Meta Model API call/token count
                    so far, and its WAYFINDER_MAX_CALLS/TOKENS caps if set
+    /voice PATH  - transcribe a local audio file (Muse Voice Transcribe)
+                   and send the transcript as a customer message - the
+                   CLI-only path for exercising STT; real WhatsApp voice
+                   notes would need OpenWA's own media pipeline wired up
+                   separately, not done here
+    /cost        - print this phone's running trip cost (confirmed
+                   bookings only, see trip_recap.add_expense)
     /quit        - exit
 Anything else typed is sent as a customer message, exactly like a WhatsApp
 text would be. Fully self-contained - once this is running, nothing about
@@ -35,8 +42,10 @@ import argparse
 import asyncio
 import importlib
 
+from pathlib import Path
+
 from mesh.lib import meta_model_client
-from mesh.orchestrator import upload_links, wayfinder_session, wayfinder_tools
+from mesh.orchestrator import trip_recap, upload_links, wayfinder_session, wayfinder_tools
 
 DEFAULT_DEV_PHONE = '+15550001234'
 
@@ -122,10 +131,23 @@ async def _main() -> None:
         if line == '/usage':
             print(meta_model_client.usage_snapshot())
             continue
+        if line == '/cost':
+            print(trip_recap._format_running_cost(phone))
+            continue
         if line.startswith('/research '):
             query = line[len('/research '):].strip()
             result = await wayfinder_tools.research(query)
             print(f'{result}\n')
+            continue
+        if line.startswith('/voice '):
+            audio_path = Path(line[len('/voice '):].strip()).expanduser()
+            if not audio_path.exists():
+                print(f'No such file: {audio_path}\n')
+                continue
+            transcript = await meta_model_client.transcribe_audio('wayfinder_dev_cli', 'transcribe_voice_note', audio_path.name, audio_path.read_bytes())
+            print(f'[transcribed] {transcript}\n')
+            reply = await wayfinder_session.handle_customer_message(phone, transcript)
+            print(f'Wayfinder: {reply}\n')
             continue
         reply = await wayfinder_session.handle_customer_message(phone, line)
         print(f'Wayfinder: {reply}\n')

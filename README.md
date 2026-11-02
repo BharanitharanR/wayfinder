@@ -47,7 +47,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Needs Python 3.11+.
+Needs Python 3.11+, and `ffmpeg` on your PATH (`brew install ffmpeg`) -
+used to convert an uploaded voice note to the WAV format Muse Voice
+Transcribe requires.
 
 ## 2. Add your Meta Model API key
 

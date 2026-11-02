@@ -25,9 +25,12 @@ import json
 import logging
 import mimetypes
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, List, Optional, Type
 
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel
@@ -297,6 +300,60 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
     _record_usage(usage)
     llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, result, usage=usage)
     return result or 'web_search found nothing conclusive for that task.'
+
+
+ASR_MODEL = 'muse-voice-transcribe-1.0'
+
+
+def _to_asr_wav(content: bytes, src_filename: str) -> bytes:
+    """Muse Voice Transcribe's /asr/transcribe endpoint only accepts a
+    RIFF/WAVE container, mono, 16-bit PCM, at 16kHz or 24kHz (confirmed
+    from the Model API docs' own 'Transcribe a file' section) - a
+    WhatsApp voice note (.ogg/opus) or any other format has to be
+    converted first. Shells out to ffmpeg (already a real dependency
+    elsewhere in this machine's toolchain) rather than pulling in a pure-
+    Python audio library for one conversion."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = Path(tmp) / f'in{Path(src_filename).suffix or ".bin"}'
+        dst_path = Path(tmp) / 'out.wav'
+        src_path.write_bytes(content)
+        result = subprocess.run(
+            ['ffmpeg', '-y', '-i', str(src_path), '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-map_metadata', '-1', str(dst_path)],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise MetaModelError(f'ffmpeg failed to convert audio to WAV: {result.stderr.decode(errors="replace")[:500]}')
+        return dst_path.read_bytes()
+
+
+async def transcribe_audio(agent_id: str, stage: str, filename: str, content: bytes) -> str:
+    """Speech-to-text via Muse Voice Transcribe - a plain REST endpoint
+    (api.meta.ai/v1/asr/transcribe), not the OpenAI-SDK-compatible Chat
+    Completions/Responses surface the rest of this module uses, so this
+    one call goes through httpx directly with a Bearer header, per the
+    Model API docs' own file-transcription example. PUSH_TO_TALK mode
+    (the default) - a WhatsApp voice note or an uploaded recording is
+    always a single utterance/turn here, not a live multi-turn stream."""
+    _check_rate_limit()
+    wav_bytes = _to_asr_wav(content, filename)
+    request_json = json.dumps({'mode': 'PUSH_TO_TALK', 'model': ASR_MODEL, 'audioEncoding': 'WAV'})
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                'https://api.meta.ai/v1/asr/transcribe',
+                headers={'Authorization': f'Bearer {os.environ.get("MODEL_API_KEY", "")}'},
+                files={'audio': (filename, wav_bytes, 'audio/wav')},
+                data={'request': request_json},
+            )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'asr', f'meta:{ASR_MODEL}', f'[audio: {filename}]', None, error=str(e))
+        raise
+    transcript = data.get('transcript', '')
+    _record_usage(None)
+    llm_log.log_call(agent_id, stage, 'asr', f'meta:{ASR_MODEL}', f'[audio: {filename}]', transcript)
+    return transcript
 
 
 class ToolChoice:
