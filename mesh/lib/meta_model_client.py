@@ -1,0 +1,207 @@
+"""
+Wayfinder's own LLM backend - calls Meta's Model API (Muse Spark) directly,
+not mesh/lib/agent_sdk.py's AdiyanAgent.ask(), which goes to the Claude CLI.
+This is deliberate and narrow: the Meta AI Developer Hackathon requires the
+submitted project to call only Meta models at runtime, and Wayfinder is the
+one agent being submitted - every other agent in this mesh keeps using
+AdiyanAgent/Claude CLI as before, untouched.
+
+Model API (https://dev.meta.ai/docs/overview) is drop-in OpenAI-SDK
+compatible: same base URL/key/model work across the Responses API, Chat
+Completions, and (for Pydantic schema calls) `beta.chat.completions.parse`.
+Chat Completions is used here, not Responses, because it has a direct
+drop-in replacement for the two shapes AdiyanAgent.ask() already gave
+Wayfinder's callers - schema=... and tools=... - with no other code in
+wayfinder_session.py/wayfinder_tools.py needing to change shape.
+
+    MODEL_API_KEY=...   required, from the Model API dashboard -> API keys.
+    WAYFINDER_META_MODEL  optional override, defaults to muse-spark-1.3.
+
+Logs through the same mesh/lib/llm_log.py every other agent's calls go
+through - one central log, this backend included, not a second silent path.
+"""
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, List, Optional, Type
+
+from dotenv import load_dotenv
+from openai import OpenAI
+from pydantic import BaseModel
+
+from mesh.lib import llm_log
+
+logger = logging.getLogger('MetaModelClient')
+
+# Repo-root .env, gitignored (see .gitignore's .env/.env.* lines) - this is
+# where MODEL_API_KEY lives for local/dev runs and for a judge running
+# this repo from its setup instructions. .env.example at the same path
+# shows the shape with no real key, per the hackathon's own rule: never
+# commit a real key, always ship a .env.example. load_dotenv() here is a
+# no-op if the file doesn't exist or the var is already set in the shell -
+# an already-exported MODEL_API_KEY always wins.
+load_dotenv(Path(__file__).resolve().parent.parent.parent / '.env')
+
+BASE_URL = 'https://api.meta.ai/v1'
+DEFAULT_MODEL = os.environ.get('WAYFINDER_META_MODEL', 'muse-spark-1.3')
+
+_client: Optional[OpenAI] = None
+
+
+class MetaModelError(RuntimeError):
+    pass
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        api_key = os.environ.get('MODEL_API_KEY')
+        if not api_key:
+            raise MetaModelError('MODEL_API_KEY is not set - get one from the Model API dashboard (dev.meta.ai) and export it.')
+        _client = OpenAI(base_url=BASE_URL, api_key=api_key)
+    return _client
+
+
+def _usage_dict(usage) -> Optional[dict]:
+    """Chat Completions usage carries prompt_tokens/completion_tokens; the
+    Responses API (used by web_search below) carries input_tokens/
+    output_tokens directly - both read here so one helper covers either
+    call shape."""
+    if usage is None:
+        return None
+    input_tokens = getattr(usage, 'input_tokens', None)
+    if input_tokens is None:
+        input_tokens = usage.prompt_tokens
+    output_tokens = getattr(usage, 'output_tokens', None)
+    if output_tokens is None:
+        output_tokens = usage.completion_tokens
+    return {'input_tokens': input_tokens, 'output_tokens': output_tokens}
+
+
+async def ask_text(agent_id: str, stage: str, prompt: str, system: Optional[str] = None) -> str:
+    """Plain text call - the Chat Completions equivalent of
+    AdiyanAgent.ask(prompt, stage=...) with no schema/tools."""
+    messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
+    model = DEFAULT_MODEL
+    try:
+        response = _get_client().chat.completions.create(model=model, messages=messages)
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'text', f'meta:{model}', prompt, None, error=str(e))
+        raise
+    text = response.choices[0].message.content or ''
+    llm_log.log_call(agent_id, stage, 'text', f'meta:{model}', prompt, text, usage=_usage_dict(response.usage))
+    return text
+
+
+async def ask_schema(agent_id: str, stage: str, prompt: str, schema: Type[BaseModel], system: Optional[str] = None) -> BaseModel:
+    """Structured call - the Chat Completions equivalent of
+    AdiyanAgent.ask(prompt, stage=..., schema=SomeModel), using the OpenAI
+    SDK's own `beta.chat.completions.parse` (Model API docs: 'Using
+    Pydantic models') so the result is already a validated `schema`
+    instance, same as what callers got back from AdiyanAgent.ask()."""
+    messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
+    model = DEFAULT_MODEL
+    try:
+        response = _get_client().beta.chat.completions.parse(model=model, messages=messages, response_format=schema)
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, None, error=str(e))
+        raise
+    parsed = response.choices[0].message.parsed
+    if parsed is None:
+        error = 'Model API returned no parsed result (refusal or non-conforming output).'
+        llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, None, error=error)
+        raise MetaModelError(error)
+    llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, parsed, usage=_usage_dict(response.usage))
+    return parsed
+
+
+def _tool_to_function_def(tool) -> dict:
+    """A langchain @tool object -> Model API's nested Chat Completions tool
+    shape ({"type": "function", "function": {...}}) - see 'Defining tools'/
+    'Tool calling with Chat Completions' in the Model API docs."""
+    schema = dict(tool.get_input_schema().model_json_schema())
+    for noise in ('title', 'description', '$defs'):
+        schema.pop(noise, None)
+    schema.setdefault('type', 'object')
+    schema.setdefault('properties', {})
+    return {
+        'type': 'function',
+        'function': {
+            'name': tool.name,
+            'description': tool.description or '',
+            'parameters': schema,
+        },
+    }
+
+
+async def web_search(agent_id: str, stage: str, task: str) -> str:
+    """Meta's own built-in search-grounding tool (Responses API only - see
+    'Search grounding' in the Model API docs) - the model runs the search
+    itself server-side and returns a cited answer. Used instead of a
+    developer-defined browser-automation tool so Wayfinder needs no local
+    browser agent process and no separate permission token to look
+    something up on the live web - one more thing a judge running this
+    repo standalone doesn't need running."""
+    model = DEFAULT_MODEL
+    try:
+        response = _get_client().responses.create(
+            model=model, input=task, tools=[{'type': 'web_search'}],
+        )
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, None, error=str(e))
+        raise
+    text_parts: List[str] = []
+    sources: List[str] = []
+    for item in response.output:
+        if getattr(item, 'type', None) != 'message':
+            continue
+        for block in item.content:
+            if getattr(block, 'type', None) != 'output_text':
+                continue
+            text_parts.append(block.text)
+            for ann in (block.annotations or []):
+                if getattr(ann, 'type', None) == 'url_citation' and ann.url not in sources:
+                    sources.append(ann.url)
+    result = '\n'.join(text_parts).strip()
+    if sources:
+        result += '\n\nSources: ' + ', '.join(sources)
+    llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, result, usage=_usage_dict(response.usage))
+    return result or 'web_search found nothing conclusive for that task.'
+
+
+class ToolChoice:
+    """What a tools= call returns: the model's chosen call(s), not yet
+    executed - same contract AdiyanAgent.ask(tools=...) already had
+    (mesh/lib/agent_sdk.py's own docstring), so callers read
+    `.tool_calls` exactly as before."""
+
+    def __init__(self, tool_calls: List[dict]):
+        self.tool_calls = tool_calls
+
+
+async def ask_tools(agent_id: str, stage: str, prompt: str, tools: list, system: Optional[str] = None) -> ToolChoice:
+    """Tool-selection call - the Chat Completions equivalent of
+    AdiyanAgent.ask(prompt, stage=..., tools=[...]). Returns the model's
+    chosen call(s) as {'name': ..., 'args': {...}} dicts; the caller still
+    executes the tool itself (Model API does not run developer-defined
+    tools server-side - see 'How it works' in the tool-calling docs)."""
+    messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
+    model = DEFAULT_MODEL
+    function_defs = [_tool_to_function_def(t) for t in tools]
+    try:
+        response = _get_client().chat.completions.create(model=model, messages=messages, tools=function_defs)
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'tools', f'meta:{model}', prompt, None, error=str(e))
+        raise
+    message = response.choices[0].message
+    calls = []
+    for tc in (message.tool_calls or []):
+        try:
+            args = json.loads(tc.function.arguments)
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+        calls.append({'name': tc.function.name, 'args': args, 'id': tc.id, 'type': 'tool_call'})
+    logged_response: Any = message.content or f'[tool_calls: {calls}]' if calls else (message.content or '')
+    llm_log.log_call(agent_id, stage, 'tools', f'meta:{model}', prompt, logged_response, usage=_usage_dict(response.usage))
+    return ToolChoice(calls)
