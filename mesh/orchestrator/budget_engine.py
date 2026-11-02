@@ -180,6 +180,41 @@ def calculate_trip_budget(*, current_balance, emergency_reserve, upcoming_obliga
     }
 
 
+def evaluate_trip_affordability(*, estimated_trip_cost, safe_trip_budget, search_exhausted=False) -> dict:
+    """Deterministic hard gate for a researched itinerary.
+
+    safe_trip_budget must be calculated separately from statement-derived
+    financial data after accounting for protected reserves and known
+    obligations. A closing balance or average monthly surplus alone is not
+    a safe trip budget. Missing either value produces INSUFFICIENT_DATA.
+    """
+    if estimated_trip_cost is None or safe_trip_budget is None:
+        return {
+            'status': 'INSUFFICIENT_DATA',
+            'estimated_trip_cost': None if estimated_trip_cost is None else float(_money(estimated_trip_cost)),
+            'safe_trip_budget': None if safe_trip_budget is None else float(_money(safe_trip_budget)),
+            'shortfall': None,
+            'can_recommend_as_affordable': False,
+        }
+
+    cost = _money(estimated_trip_cost)
+    budget = max(Decimal('0'), _money(safe_trip_budget))
+    if cost <= budget:
+        status = 'AFFORDABLE'
+    elif search_exhausted:
+        status = 'NOT_AFFORDABLE'
+    else:
+        status = 'NEEDS_OPTIMIZATION'
+
+    return {
+        'status': status,
+        'estimated_trip_cost': float(cost),
+        'safe_trip_budget': float(budget),
+        'shortfall': float(_money(max(Decimal('0'), cost - budget))),
+        'can_recommend_as_affordable': status == 'AFFORDABLE',
+    }
+
+
 def estimate_trip_cost(*, flights, hotel, daily_cost_per_person, family_size, nights, contingency=0.10) -> dict:
     daily = _money(daily_cost_per_person) * family_size * (nights + 1)
     base = _money(flights) + _money(hotel) + daily
