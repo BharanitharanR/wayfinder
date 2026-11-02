@@ -126,6 +126,14 @@ up, not a real person's data:
   codes instead, a single +/- amount column, no running balance - closer
   to what a real statement actually looks like.
 
+The clean one produces a trustworthy budget read; the messy one deliberately
+doesn't (too many unlabeled transactions) - that's `mesh/orchestrator/
+budget_engine.py` working as intended, not a bug. See that file's own
+docstring for how the number is computed: Muse Spark normalizes the
+statement into a strict transaction list (the one model call in this
+step), then classification, monthly aggregation, and the surplus figure
+itself are plain deterministic Python - no LLM guesses the number.
+
 When Wayfinder prints an upload link (first message, or `/link`), open it
 in a browser and upload either file - that's the real upload/extraction
 path (Muse Spark reading the PDF directly), not a shortcut, so the text

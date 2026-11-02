@@ -1,0 +1,14 @@
+{
+  "rules": [
+    {"contains": ["PAYROLL", "SALARY"], "category": "SALARY", "confidence": 0.95},
+    {"contains": ["RENT"], "category": "ESSENTIAL", "confidence": 0.95},
+    {"contains": ["SCHOOL", "TUITION", "FEE"], "category": "ESSENTIAL", "confidence": 0.9},
+    {"contains": ["HOME LOAN", "EMI", "LOAN"], "category": "OBLIGATION", "confidence": 0.85},
+    {"contains": ["ELECTRICITY", "WATER BILL", "GAS BILL", "TNEB", "BILLDESK"], "category": "ESSENTIAL", "confidence": 0.85},
+    {"contains": ["MOBILE", "BROADBAND", "RECHARGE", "AIRTEL", "JIO"], "category": "ESSENTIAL", "confidence": 0.85},
+    {"contains": ["FUEL", "PETROL", "INDIAN OIL"], "category": "ESSENTIAL", "confidence": 0.8},
+    {"contains": ["GROCERY", "SUPERMARKET", "DMART", "BIG BAZAAR", "RELIANCE FRESH"], "category": "ESSENTIAL", "confidence": 0.75},
+    {"contains": ["RESTAURANT", "CAFE", "PIZZA", "SWIGGY", "ZOMATO"], "category": "DISCRETIONARY", "confidence": 0.75},
+    {"contains": ["PHARMACY", "APOLLO", "MEDPLUS"], "category": "ESSENTIAL", "confidence": 0.75}
+  ]
+}

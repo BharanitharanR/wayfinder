@@ -127,9 +127,36 @@ def get_context_documents(phone: str) -> List[Dict[str, Any]]:
     state reconstruction has no reason to redo that work."""
     cursor = _db()[UPLOADS_COLLECTION].find(
         {'phone': phone, 'status': 'ok'},
-        {'_id': 0, 'filename': 1, 'extracted_text': 1, 'uploaded_at': 1},
+        {'_id': 0, 'filename': 1, 'extracted_text': 1, 'uploaded_at': 1, 'financial_profile': 1},
     )
     return list(cursor)
+
+
+def _best_financial_profile(documents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The most recent trustworthy financial_profile (budget_engine.py's
+    deterministic read of an uploaded statement), if any document has
+    one. Picks trustworthy over untrustworthy, then most recently
+    uploaded - never averages across multiple statements, since two
+    different accounts' surpluses aren't additive without knowing if
+    they're the same household's only accounts."""
+    candidates = [d for d in documents if d.get('financial_profile') and 'error' not in d['financial_profile']]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda d: (d['financial_profile'].get('trustworthy', False), d.get('uploaded_at', '')), reverse=True)
+    return candidates[0]['financial_profile']
+
+
+def _deterministic_budget_signal(profile: Dict[str, Any]) -> str:
+    surplus = profile.get('average_monthly_surplus')
+    currency = profile.get('currency', '')
+    ratio_pct = round(profile.get('classified_debit_ratio', 0) * 100)
+    if profile.get('trustworthy') and surplus is not None:
+        return f'Computed from the uploaded statement (deterministic, not an LLM guess): average monthly surplus ~{currency} {surplus:,.2f}, over {profile.get("months_analyzed", 0)} month(s), {ratio_pct}% of spending classified.'
+    return (
+        f'The uploaded statement could not be read confidently enough to state a number - only {ratio_pct}% of '
+        'spending was classified (too many unlabeled transactions). Ask the customer to confirm their typical '
+        'monthly surplus directly rather than trusting this statement alone.'
+    )
 
 
 def _format_chat_transcript(turns: List[Dict[str, Any]]) -> str:
@@ -147,12 +174,31 @@ def _format_documents_text(documents: List[Dict[str, Any]]) -> str:
 async def infer_profile(chat_history: List[Dict[str, Any]], documents: List[Dict[str, Any]]) -> CustomerSnapshot:
     """The actual marriage: one LLM call over both raw sources, returning
     the distilled CustomerSnapshot rather than leaving every caller to
-    re-read the same transcript+documents text itself."""
+    re-read the same transcript+documents text itself.
+
+    budget_signal is then overridden with a deterministic read
+    (budget_engine.py), when one of the uploaded documents has a computed
+    financial_profile - the LLM's own free-text read of the statement is
+    discarded in that case, not blended with it, since the whole point is
+    one real, auditable number rather than a plausible-sounding guess.
+    missing_info is adjusted to match: a budget-related ask the LLM added
+    is dropped once a trustworthy number exists; one is added if the
+    statement couldn't be read confidently, even if the LLM didn't notice."""
     prompt = _SNAPSHOT_PROMPT.format(
         chat_transcript=_format_chat_transcript(chat_history),
         documents_text=_format_documents_text(documents),
     )
-    return await meta_model_client.ask_schema(AGENT_ID, 'infer_profile', prompt, CustomerSnapshot)
+    snapshot = await meta_model_client.ask_schema(AGENT_ID, 'infer_profile', prompt, CustomerSnapshot)
+
+    financial_profile = _best_financial_profile(documents)
+    if financial_profile is not None:
+        snapshot.budget_signal = _deterministic_budget_signal(financial_profile)
+        budget_related = lambda item: any(kw in item.lower() for kw in ('budget', 'statement', 'financial', 'surplus'))
+        snapshot.missing_info = [item for item in snapshot.missing_info if not budget_related(item)]
+        if not financial_profile.get('trustworthy'):
+            snapshot.missing_info.append('a confirmed monthly budget/surplus figure, since the uploaded statement could not be read confidently enough on its own')
+
+    return snapshot
 
 
 async def build_state(phone: str, chat_limit: int = 100) -> Dict[str, Any]:

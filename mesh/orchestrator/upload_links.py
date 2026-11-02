@@ -35,7 +35,7 @@ from starlette.responses import HTMLResponse, PlainTextResponse
 from starlette.routing import Route
 
 from mesh.lib import meta_model_client
-from mesh.orchestrator import short_links
+from mesh.orchestrator import budget_engine, short_links
 
 _AGENT_ID = 'wayfinder_upload_links'
 
@@ -394,6 +394,18 @@ async def _upload_submit(request: Request):
         (customer_dir / safe_name).write_bytes(content)
 
         outcome = await _extract_text(upload.filename, content, password)
+        # Computed once, here, at upload time - not re-derived on every
+        # WhatsApp turn (the prototype engine's own production-hardening
+        # note #2). None for a document that isn't statement-shaped (the
+        # local prefilter in budget_engine._is_statement_like catches
+        # that with no model call spent) - a leave calendar or school
+        # holiday PDF just gets None, harmlessly.
+        financial_profile = None
+        if outcome['status'] == 'ok':
+            try:
+                financial_profile = await budget_engine.compute_financial_profile(_AGENT_ID, outcome['text'])
+            except Exception as e:
+                financial_profile = {'error': str(e)}
         _db()[UPLOADS_COLLECTION].insert_one({
             'phone': phone,
             'filename': upload.filename,
@@ -402,6 +414,7 @@ async def _upload_submit(request: Request):
             'status': outcome['status'],
             'extracted_text': outcome['text'],
             'error': outcome['error'],
+            'financial_profile': financial_profile,
         })
         results.append({'filename': upload.filename, 'status': outcome['status']})
 
