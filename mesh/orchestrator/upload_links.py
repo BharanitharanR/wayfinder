@@ -21,6 +21,7 @@ the link itself carries the customer's E.164 phone number, fixed at
 creation time by this process, never trusted from the request body.
 """
 import io
+import mimetypes
 import os
 import re
 import secrets
@@ -35,7 +36,7 @@ from starlette.responses import HTMLResponse, PlainTextResponse
 from starlette.routing import Route
 
 from mesh.lib import meta_model_client
-from mesh.orchestrator import budget_engine, short_links
+from mesh.orchestrator import budget_engine, short_links, trip_recap
 
 _AGENT_ID = 'wayfinder_upload_links'
 
@@ -390,6 +391,21 @@ async def _upload_submit(request: Request):
     results = []
     for upload in uploads:
         content = await upload.read()
+
+        # Trip photos (JPEG/PNG/...) branch to trip_recap.py entirely -
+        # captioned once there and never run through the statement/OCR
+        # path above, which would try to read a beach photo as if it
+        # were a bank statement. Everything else (PDFs, scanned
+        # documents) keeps the existing path below unchanged.
+        mime_type, _ = mimetypes.guess_type(upload.filename)
+        if mime_type and mime_type.startswith('image/'):
+            try:
+                await trip_recap.handle_photo_upload(phone, upload.filename, content)
+                results.append({'filename': upload.filename, 'status': 'ok'})
+            except Exception as e:
+                results.append({'filename': upload.filename, 'status': 'error'})
+            continue
+
         safe_name = f'{int(time.time() * 1000)}_{Path(upload.filename).name}'
         (customer_dir / safe_name).write_bytes(content)
 

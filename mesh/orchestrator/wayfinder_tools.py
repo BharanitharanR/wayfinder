@@ -49,9 +49,11 @@ from typing import List, Optional
 from langchain_core.tools import tool
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from pydantic import BaseModel, Field
 
 from mesh.lib import meta_model_client
 from mesh.lib.errors import describe_exception
+from mesh.orchestrator.letsfg_tools import search_flights_letsfg
 
 AGENT_ID = 'wayfinder_tools'
 KIWI_MCP_URL = 'https://mcp.kiwi.com'
@@ -171,7 +173,14 @@ async def search_hotels(
     return '\n'.join(lines)
 
 
-TOOLS = [web_search, search_flights, search_hotels]
+TOOLS = [web_search, search_flights, search_hotels, search_flights_letsfg]
+# book_flight_letsfg is deliberately NOT in this list - see
+# letsfg_tools.py's own docstring and wayfinder_session.py's booking-
+# confirmation gate. A tool in TOOLS can be picked autonomously by the
+# recommend_trip() ReAct loop below; booking real (or sandbox) money
+# must never be something Muse Spark decides to do on its own turn -
+# only wayfinder_session.py calls book_flight_letsfg directly, and only
+# after the customer's own explicit yes against a specific stored offer.
 
 
 async def research(query: str) -> str:
@@ -198,7 +207,7 @@ _RECOMMEND_PROMPT = """You are Wayfinder, planning an actual trip for a customer
 
 {profile_summary}
 
-Today's date is {today}. Decide what to look up next to put together a real recommendation - typically flights first, then a hotel at the destination, though use your judgment about order and whether a web_search for destination-specific advice is also worth doing. You have already made these tool calls this session:
+Today's date is {today}. Decide what to look up next to put together a real recommendation - typically flights first, then a hotel at the destination, though use your judgment about order and whether a web_search for destination-specific advice is also worth doing. For flights, prefer search_flights_letsfg over search_flights: only a search_flights_letsfg offer can actually be booked later through this chat if the customer says yes, so use search_flights (Kiwi, link-out only) only if search_flights_letsfg genuinely fails or returns nothing useful. You have already made these tool calls this session:
 
 {calls_so_far}
 
@@ -212,7 +221,24 @@ Here is everything your research tool calls actually found:
 
 {calls_so_far}
 
-Write a short, concrete recommendation grounded ONLY in the real data above - cite the actual prices and booking links that came back, never invent a number, hotel, or flight that wasn't in the tool results above. If a tool call failed or found nothing, say so plainly rather than making something up to fill the gap. If predicted period windows or a kids' school calendar were given in the profile above, prefer picking/confirming travel dates that avoid both, within whatever the stated travel_window/leave dates actually allow - if every date in the leave window conflicts with one of them, say so plainly rather than silently picking a date that conflicts. Keep it to a few short paragraphs, suitable to send over WhatsApp."""
+Write a short, concrete recommendation grounded ONLY in the real data above - cite the actual prices and booking links that came back, never invent a number, hotel, or flight that wasn't in the tool results above. If a tool call failed or found nothing, say so plainly rather than making something up to fill the gap. If predicted period windows or a kids' school calendar were given in the profile above, prefer picking/confirming travel dates that avoid both, within whatever the stated travel_window/leave dates actually allow - if every date in the leave window conflicts with one of them, say so plainly rather than silently picking a date that conflicts. Keep it to a few short paragraphs, suitable to send over WhatsApp.
+
+If (and only if) a search_flights_letsfg call above returned a real offer_id for the flight you are actually recommending, also fill in bookable_offer with that exact search_id/offer_id/price/currency, PLUS the exact adults/children you passed into that same search_flights_letsfg call (a booking must match the same party size or it's rejected) - and end recommendation_text by asking the customer to reply yes to book it. Leave bookable_offer null if you're recommending a Kiwi (search_flights) result instead, or if you're not confident enough in a specific offer to recommend booking it yet - never invent a search_id/offer_id/adults/children that didn't come from a real tool result above."""
+
+
+class BookableOffer(BaseModel):
+    search_id: str = Field(description='The exact search_id a search_flights_letsfg call above returned.')
+    offer_id: str = Field(description='The exact offer_id of the one specific flight offer being recommended.')
+    summary: str = Field(description='A short human-readable description of this flight (route, date, airline) for logging/display.')
+    price: float = Field(description='The exact price shown for this offer.')
+    currency: str = Field(description='The currency code for that price.')
+    adults: int = Field(description='The exact `adults` value used in the search_flights_letsfg call that returned this offer - a booking must match the same party size or LetsFG rejects it (party_mismatch).')
+    children: int = Field(default=0, description='The exact `children` value used in that same search_flights_letsfg call.')
+
+
+class TripRecommendation(BaseModel):
+    recommendation_text: str = Field(description='The customer-facing recommendation message, suitable to send over WhatsApp as-is.')
+    bookable_offer: Optional[BookableOffer] = Field(default=None, description='Set only when recommending a specific search_flights_letsfg offer the customer could book by replying yes. Null otherwise - never invented.')
 
 
 def predict_period_windows(last_period_start: str, cycle_length_days: int, period_length_days: int = 5, horizon_days: int = 90) -> List[str]:
@@ -254,17 +280,21 @@ def _format_profile(profile) -> str:
     return '\n'.join(lines)
 
 
-async def recommend_trip(profile) -> str:
+async def recommend_trip(profile) -> TripRecommendation:
     """The actual "prescribe a trip" step, called once a CustomerSnapshot
     has nothing left in missing_info - a small, bounded ReAct loop (not
     Analysis Agent's full multi-turn one): up to 3 rounds of "choose one
     tool call, run it for real, feed the real result back", then one
-    final plain-text call that writes the customer-facing recommendation
-    from only what those real calls actually returned. Grounding is
-    enforced in the prompt (never invent a number/flight/hotel), not by
-    code - there's no deterministic way to verify an LLM's prose stayed
-    grounded, same limitation every other free-text stage in this file
-    already has."""
+    final schema call that writes the customer-facing recommendation
+    text AND, when applicable, the exact bookable LetsFG offer it's
+    recommending - from only what those real calls actually returned.
+    Grounding is enforced in the prompt (never invent a number/flight/
+    hotel/offer id), not by code - there's no deterministic way to
+    verify an LLM's prose stayed grounded, same limitation every other
+    free-text stage in this file already has. Returns the structured
+    TripRecommendation, not a bare string, so wayfinder_session.py can
+    store bookable_offer as the one thing a later "yes" is allowed to
+    book - never a model's free-text reconstruction of it."""
     profile_summary = _format_profile(profile)
     calls_so_far: list[str] = []
 
@@ -293,4 +323,4 @@ async def recommend_trip(profile) -> str:
         profile_summary=profile_summary,
         calls_so_far='\n\n'.join(calls_so_far) if calls_so_far else '(no research calls were made)',
     )
-    return await meta_model_client.ask_text(AGENT_ID, 'final_recommendation', final_prompt)
+    return await meta_model_client.ask_schema(AGENT_ID, 'final_recommendation', final_prompt, TripRecommendation)

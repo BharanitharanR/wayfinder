@@ -22,9 +22,18 @@ larger platform underneath it required.
 
 - A terminal chat with Wayfinder (`wayfinder_dev_cli.py`) - type messages,
   get replies, exactly like texting it.
-- Real tool calls behind the scenes: live flight search (Kiwi.com), live
-  hotel search (Trivago), and live web search (Meta's own built-in search
-  grounding) - all real, no mocked data.
+- Real tool calls behind the scenes: live flight search (Kiwi.com and
+  LetsFG), live hotel search (Trivago), and live web search (Meta's own
+  built-in search grounding) - all real, no mocked data.
+- Real flight booking, with your explicit confirmation first: LetsFG's
+  sandbox API books a real-shaped (fake-airline) flight end to end once
+  you say yes to a specific offer - never automatically, and never from
+  inside the model's own tool-choice loop. See LETSFG_ENV in `.env.example`
+  for what it takes to point this at real bookings instead.
+- Trip recaps: upload photos during a trip, say you're back (or Wayfinder
+  notices a flight/train selfie near your travel dates), and it drafts a
+  blog-style recap page with your photos - published to a public,
+  shareable link only once you say yes.
 - A local MongoDB holding your conversation state (so you can close the
   terminal and pick up where you left off).
 

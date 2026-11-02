@@ -55,6 +55,42 @@ class MetaModelError(RuntimeError):
     pass
 
 
+class RateLimitExceeded(MetaModelError):
+    pass
+
+
+# Per-process call/token budget - a plain in-memory guard, not a durable
+# quota (resets on restart, doesn't coordinate across multiple processes).
+# Exists to catch a runaway loop or an unexpectedly expensive demo run
+# before it burns real spend, not to meter production usage precisely.
+# 0/unset means "no limit" for that dimension.
+_MAX_CALLS = int(os.environ.get('WAYFINDER_MAX_CALLS', '0') or '0')
+_MAX_TOKENS = int(os.environ.get('WAYFINDER_MAX_TOKENS', '0') or '0')
+_call_count = 0
+_token_total = 0
+
+
+def _check_rate_limit() -> None:
+    if _MAX_CALLS and _call_count >= _MAX_CALLS:
+        raise RateLimitExceeded(f'Hit WAYFINDER_MAX_CALLS ({_MAX_CALLS}) for this process - {_call_count} Meta Model API calls already made. Restart to reset, or raise the limit in .env.')
+    if _MAX_TOKENS and _token_total >= _MAX_TOKENS:
+        raise RateLimitExceeded(f'Hit WAYFINDER_MAX_TOKENS ({_MAX_TOKENS}) for this process - {_token_total} tokens already used. Restart to reset, or raise the limit in .env.')
+
+
+def _record_usage(usage: Optional[dict]) -> None:
+    global _call_count, _token_total
+    _call_count += 1
+    if usage:
+        _token_total += usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+
+
+def usage_snapshot() -> dict:
+    """What this process has spent so far against its own budget - the
+    dev CLI's /state (or a new /usage command) can print this without
+    grepping the log file."""
+    return {'calls': _call_count, 'tokens': _token_total, 'max_calls': _MAX_CALLS or None, 'max_tokens': _MAX_TOKENS or None}
+
+
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
@@ -106,6 +142,7 @@ async def extract_document_text(agent_id: str, stage: str, filename: str, conten
     the Files API, since Wayfinder has no reuse case for the same
     document across requests - it's parsed once at upload time and the
     resulting text is what gets stored."""
+    _check_rate_limit()
     mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
     file_data = f'data:{mime_type};base64,{base64.b64encode(content).decode()}'
     model = DEFAULT_MODEL
@@ -122,13 +159,50 @@ async def extract_document_text(agent_id: str, stage: str, filename: str, conten
         llm_log.log_call(agent_id, stage, 'document', f'meta:{model}', f'[document: {filename}]', None, error=str(e))
         raise
     text = response.choices[0].message.content or ''
-    llm_log.log_call(agent_id, stage, 'document', f'meta:{model}', f'[document: {filename}]', text, usage=_usage_dict(response.usage))
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'document', f'meta:{model}', f'[document: {filename}]', text, usage=usage)
     return text
+
+
+async def ask_schema_with_file(agent_id: str, stage: str, prompt: str, filename: str, content: bytes, schema: Type[BaseModel]) -> BaseModel:
+    """Like ask_schema, but with a file (image, PDF, etc.) attached to the
+    same message - the same 'file' content block extract_document_text
+    uses, just with structured output instead of a raw-text return. Used
+    for trip-photo analysis (mesh/orchestrator/trip_recap.py): one call
+    does both captioning and transit-selfie detection via one schema,
+    rather than two separate calls."""
+    _check_rate_limit()
+    mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    file_data = f'data:{mime_type};base64,{base64.b64encode(content).decode()}'
+    model = DEFAULT_MODEL
+    messages = [{
+        'role': 'user',
+        'content': [
+            {'type': 'text', 'text': prompt},
+            {'type': 'file', 'file': {'filename': filename, 'file_data': file_data}},
+        ],
+    }]
+    try:
+        response = _get_client().beta.chat.completions.parse(model=model, messages=messages, response_format=schema)
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'schema_file', f'meta:{model}', f'[file: {filename}] {prompt}', None, error=str(e))
+        raise
+    parsed = response.choices[0].message.parsed
+    if parsed is None:
+        error = 'Model API returned no parsed result (refusal or non-conforming output).'
+        llm_log.log_call(agent_id, stage, 'schema_file', f'meta:{model}', f'[file: {filename}] {prompt}', None, error=error)
+        raise MetaModelError(error)
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'schema_file', f'meta:{model}', f'[file: {filename}] {prompt}', parsed, usage=usage)
+    return parsed
 
 
 async def ask_text(agent_id: str, stage: str, prompt: str, system: Optional[str] = None) -> str:
     """Plain text call - the Chat Completions equivalent of
     AdiyanAgent.ask(prompt, stage=...) with no schema/tools."""
+    _check_rate_limit()
     messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
     model = DEFAULT_MODEL
     try:
@@ -137,7 +211,9 @@ async def ask_text(agent_id: str, stage: str, prompt: str, system: Optional[str]
         llm_log.log_call(agent_id, stage, 'text', f'meta:{model}', prompt, None, error=str(e))
         raise
     text = response.choices[0].message.content or ''
-    llm_log.log_call(agent_id, stage, 'text', f'meta:{model}', prompt, text, usage=_usage_dict(response.usage))
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'text', f'meta:{model}', prompt, text, usage=usage)
     return text
 
 
@@ -147,6 +223,7 @@ async def ask_schema(agent_id: str, stage: str, prompt: str, schema: Type[BaseMo
     SDK's own `beta.chat.completions.parse` (Model API docs: 'Using
     Pydantic models') so the result is already a validated `schema`
     instance, same as what callers got back from AdiyanAgent.ask()."""
+    _check_rate_limit()
     messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
     model = DEFAULT_MODEL
     try:
@@ -159,7 +236,9 @@ async def ask_schema(agent_id: str, stage: str, prompt: str, schema: Type[BaseMo
         error = 'Model API returned no parsed result (refusal or non-conforming output).'
         llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, None, error=error)
         raise MetaModelError(error)
-    llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, parsed, usage=_usage_dict(response.usage))
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, parsed, usage=usage)
     return parsed
 
 
@@ -190,6 +269,7 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
     browser agent process and no separate permission token to look
     something up on the live web - one more thing a judge running this
     repo standalone doesn't need running."""
+    _check_rate_limit()
     model = DEFAULT_MODEL
     try:
         response = _get_client().responses.create(
@@ -213,7 +293,9 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
     result = '\n'.join(text_parts).strip()
     if sources:
         result += '\n\nSources: ' + ', '.join(sources)
-    llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, result, usage=_usage_dict(response.usage))
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, result, usage=usage)
     return result or 'web_search found nothing conclusive for that task.'
 
 
@@ -233,6 +315,7 @@ async def ask_tools(agent_id: str, stage: str, prompt: str, tools: list, system:
     chosen call(s) as {'name': ..., 'args': {...}} dicts; the caller still
     executes the tool itself (Model API does not run developer-defined
     tools server-side - see 'How it works' in the tool-calling docs)."""
+    _check_rate_limit()
     messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
     model = DEFAULT_MODEL
     function_defs = [_tool_to_function_def(t) for t in tools]
@@ -250,5 +333,7 @@ async def ask_tools(agent_id: str, stage: str, prompt: str, tools: list, system:
             args = {}
         calls.append({'name': tc.function.name, 'args': args, 'id': tc.id, 'type': 'tool_call'})
     logged_response: Any = message.content or f'[tool_calls: {calls}]' if calls else (message.content or '')
-    llm_log.log_call(agent_id, stage, 'tools', f'meta:{model}', prompt, logged_response, usage=_usage_dict(response.usage))
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'tools', f'meta:{model}', prompt, logged_response, usage=usage)
     return ToolChoice(calls)

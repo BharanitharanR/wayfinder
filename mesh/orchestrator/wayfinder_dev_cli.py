@@ -24,6 +24,8 @@ Commands inside the REPL:
                    its own, and nothing here restarts for you otherwise.
                    Edit the file in your editor, save, then /reload here.
     /reset       - wipe this phone's chat_turns/uploads/links (start clean)
+    /usage       - print this process's Meta Model API call/token count
+                   so far, and its WAYFINDER_MAX_CALLS/TOKENS caps if set
     /quit        - exit
 Anything else typed is sent as a customer message, exactly like a WhatsApp
 text would be. Fully self-contained - once this is running, nothing about
@@ -33,6 +35,7 @@ import argparse
 import asyncio
 import importlib
 
+from mesh.lib import meta_model_client
 from mesh.orchestrator import upload_links, wayfinder_session, wayfinder_tools
 
 DEFAULT_DEV_PHONE = '+15550001234'
@@ -115,6 +118,9 @@ async def _main() -> None:
             continue
         if line == '/reset':
             _reset(phone)
+            continue
+        if line == '/usage':
+            print(meta_model_client.usage_snapshot())
             continue
         if line.startswith('/research '):
             query = line[len('/research '):].strip()

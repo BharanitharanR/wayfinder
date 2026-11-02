@@ -33,12 +33,14 @@ from pydantic import BaseModel, Field
 from pymongo import ASCENDING, MongoClient
 
 from mesh.lib import meta_model_client
-from mesh.orchestrator import upload_links, wayfinder_tools
+from mesh.orchestrator import trip_recap, upload_links, wayfinder_tools
+from mesh.orchestrator.letsfg_tools import book_flight_letsfg
 
 MONGO_URL = os.environ.get('ADIYAN_MONGO_URL', 'mongodb://localhost:27017')
 MONGO_DB_NAME = os.environ.get('ADIYAN_MONGO_DB_DATA', 'adiyan')
 CHAT_COLLECTION = 'wayfinder_chat_turns'
 UPLOADS_COLLECTION = 'wayfinder_uploads'  # owned by upload_links.py
+PENDING_BOOKING_COLLECTION = 'wayfinder_pending_bookings'
 
 # Wayfinder calls Meta's Model API (mesh/lib/meta_model_client.py)
 # directly, never AdiyanAgent/Claude CLI - this is the one agent submitted
@@ -234,6 +236,126 @@ def _missing_info_reply(missing_info: List[str]) -> str:
 _RESEARCHING_PREFIX = "Got everything I need - let me find some real options for you.\n\n"
 
 
+class _BookingConfirmation(BaseModel):
+    confirmed: bool = Field(description="True only if the customer's message is a clear yes to booking the specific offer just offered - not a question, not a maybe, not about something else entirely.")
+
+
+class _PassengerName(BaseModel):
+    given_name: str = Field(description='The first/given name, as it should appear on the ticket.')
+    family_name: str = Field(description='The surname/family name, as it should appear on the ticket.')
+
+
+def _get_pending_booking(identity_key: str) -> Optional[Dict[str, Any]]:
+    return _db()[PENDING_BOOKING_COLLECTION].find_one({'phone': identity_key, 'status': {'$in': ['offered', 'awaiting_name']}})
+
+
+def _save_pending_booking(identity_key: str, offer) -> None:
+    """One pending offer per customer - a new recommendation replaces
+    whatever offer (if any) was pending before, since a customer who got
+    a second recommendation is no longer deciding on the first one."""
+    _db()[PENDING_BOOKING_COLLECTION].update_one(
+        {'phone': identity_key},
+        {'$set': {
+            'phone': identity_key, 'search_id': offer.search_id, 'offer_id': offer.offer_id,
+            'summary': offer.summary, 'price': offer.price, 'currency': offer.currency,
+            'adults': offer.adults, 'children': offer.children,
+            'status': 'offered', 'created_at': datetime.now(timezone.utc).isoformat(),
+        }},
+        upsert=True,
+    )
+
+
+async def _handle_pending_booking(identity_key: str, text: str, pending: Dict[str, Any]) -> Optional[str]:
+    """Returns a reply if `text` was actually about the pending booking
+    (confirming it, or supplying the name it asked for), None if it
+    wasn't - in which case the caller falls through to normal handling,
+    since not every message after an offer is about that offer.
+
+    The actual money-moving call (book_flight_letsfg) only ever happens
+    here, driven by this deterministic status field - never from inside
+    recommend_trip's own tool-choice loop, which never sees
+    book_flight_letsfg as an option at all (see wayfinder_tools.py's own
+    TOOLS comment). This is the one and only path to a booking."""
+    if pending['status'] == 'offered':
+        decision = await meta_model_client.ask_schema(
+            AGENT_ID, 'detect_booking_confirmation',
+            f'The customer was offered this flight: {pending["summary"]} for {pending["price"]} {pending["currency"]}. '
+            f'Their next message was: "{text}". Are they clearly confirming they want to book it?',
+            _BookingConfirmation,
+        )
+        if not decision.confirmed:
+            return None
+        _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {'status': 'awaiting_name'}})
+        return 'Great - what name should I put on the ticket, exactly as on ID (first and last name)?'
+
+    # status == 'awaiting_name': treat this message as the name itself.
+    name = await meta_model_client.ask_schema(
+        AGENT_ID, 'parse_passenger_name', f'Split this into a given name and family name: "{text}"', _PassengerName,
+    )
+    contact_email = identity_key.lstrip('+') + '@wayfinder.sandbox'
+    result = await book_flight_letsfg.ainvoke({
+        'search_id': pending['search_id'], 'offer_id': pending['offer_id'],
+        'given_name': name.given_name, 'family_name': name.family_name, 'contact_email': contact_email,
+        'adults': pending.get('adults', 1), 'children': pending.get('children', 0),
+    })
+    _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {'status': 'booked'}})
+    return result
+
+
+class _PublishDecision(BaseModel):
+    wants_to_publish: Optional[bool] = Field(description='True if the customer clearly says yes/publish it, False if they clearly say no/keep it private, null if the message is neither (a question, something unrelated).')
+
+
+async def _handle_pending_recap(identity_key: str, text: str) -> Optional[str]:
+    """Mirrors _handle_pending_booking's shape: returns a reply only if
+    `text` was actually a decision on the drafted recap, None otherwise
+    so the caller falls through to normal handling. Publishing is the
+    one real money-equivalent-risk action here (permanently public
+    personal photos), so it only happens on a clear yes - same
+    never-without-an-explicit-yes rule as booking a flight."""
+    pending = trip_recap.get_pending_recap(identity_key)
+    if pending is None:
+        return None
+    decision = await meta_model_client.ask_schema(
+        AGENT_ID, 'detect_recap_publish_decision',
+        f'The customer was shown a drafted trip blog titled "{pending["title"]}" and asked if they want to publish it publicly. '
+        f'Their next message was: "{text}". Do they want to publish it, keep it private, or is this unrelated?',
+        _PublishDecision,
+    )
+    if decision.wants_to_publish is None:
+        return None
+    if decision.wants_to_publish is False:
+        trip_recap.decline_recap(identity_key)
+        return "No problem - I'll keep your trip blog private. Just let me know if you change your mind."
+    try:
+        url = trip_recap.publish_recap(identity_key)
+    except Exception as e:
+        return f"I couldn't publish it just now ({e}). Your draft is still saved - want me to try again later?"
+    return f'Published! Here\'s your trip blog: {url}'
+
+
+async def _maybe_detect_trip_completion(identity_key: str, text: str, profile) -> Optional[str]:
+    """Checks the two trip-completion signals (see trip_recap.py's own
+    docstring) and, the first time either fires for this phone,
+    generates the draft recap and returns the publish-confirmation
+    prompt. Returns None (no-op) once a recap already exists for this
+    phone - one recap generated per trip, never regenerated on every
+    later message."""
+    if trip_recap.get_any_recap(identity_key) is not None:
+        return None
+    text_signal = await trip_recap.detect_text_completion(text)
+    photo_signal = trip_recap.detect_photo_completion(identity_key, profile.travel_window)
+    if not (text_signal or photo_signal):
+        return None
+    profile_summary = wayfinder_tools._format_profile(profile)
+    recap = await trip_recap.generate_recap(identity_key, profile_summary)
+    return (
+        f'Looks like your trip is done! I put together a trip blog - "{recap["title"]}" with '
+        f'{recap["photo_count"]} photo(s). Reply YES to publish it publicly (I\'ll send you a shareable '
+        f"link), or NO to keep it private."
+    )
+
+
 async def handle_customer_message(chat_id: str, text: str) -> str:
     """The actual intake/clarification loop - handle_message.py's new
     `vertical_id == 'wayfinder'` branch calls just this one function and
@@ -266,6 +388,18 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
 
     append_turn(identity_key, 'customer', text)
 
+    pending = _get_pending_booking(identity_key)
+    if pending is not None:
+        booking_reply = await _handle_pending_booking(identity_key, text, pending)
+        if booking_reply is not None:
+            append_turn(identity_key, 'wayfinder', booking_reply)
+            return booking_reply
+
+    recap_reply = await _handle_pending_recap(identity_key, text)
+    if recap_reply is not None:
+        append_turn(identity_key, 'wayfinder', recap_reply)
+        return recap_reply
+
     chat_history = get_chat_history(identity_key)
     documents = get_context_documents(identity_key)
     is_first_message = len(chat_history) <= 1
@@ -285,11 +419,19 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         ) + f'Upload your documents here: {link}'
     else:
         profile = await infer_profile(chat_history, documents)
+
+        recap_prompt_reply = await _maybe_detect_trip_completion(identity_key, text, profile)
+        if recap_prompt_reply is not None:
+            append_turn(identity_key, 'wayfinder', recap_prompt_reply)
+            return recap_prompt_reply
+
         if profile.missing_info:
             reply = _missing_info_reply(profile.missing_info)
         else:
             recommendation = await wayfinder_tools.recommend_trip(profile)
-            reply = _RESEARCHING_PREFIX + recommendation
+            reply = _RESEARCHING_PREFIX + recommendation.recommendation_text
+            if recommendation.bookable_offer is not None:
+                _save_pending_booking(identity_key, recommendation.bookable_offer)
 
     append_turn(identity_key, 'wayfinder', reply)
     return reply
