@@ -145,6 +145,25 @@ statement into a strict transaction list (the one model call in this
 step), then classification, monthly aggregation, and the surplus figure
 itself are plain deterministic Python - no LLM guesses the number.
 
+## Trying the trip-recap feature
+
+`mesh/orchestrator/samples/trip_photos/` ships five illustrative trip
+photos (not real photos - simple drawn scenes), each with a real embedded
+EXIF capture date spanning Dec 6-12, 2026, for exercising
+`trip_recap.py`'s photo timeline and completion detection:
+
+- `1_beach_day_arrival.jpg` through `4_sunset_beach.jpg` - ordinary trip
+  photos, each captioned by Muse Spark at upload time.
+- `5_flight_home_selfie.jpg` - deliberately looks like an airplane-window
+  shot; confirmed live against Muse Spark to set
+  `looks_like_transit_selfie=True`, which - landing near the stated
+  travel window's end date - triggers automatic trip-completion
+  detection with no explicit "we're back" message needed.
+
+Upload these the same way as a statement, through Wayfinder's own upload
+link - not as a raw WhatsApp attachment, which gets redirected to that
+link instead of processed directly.
+
 When Wayfinder prints an upload link (first message, or `/link`), open it
 in a browser and upload either file - that's the real upload/extraction
 path (Muse Spark reading the PDF directly), not a shortcut, so the text
