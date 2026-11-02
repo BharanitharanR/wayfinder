@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from pymongo import ASCENDING, MongoClient
 
 from mesh.lib import meta_model_client
-from mesh.orchestrator import trip_recap, upload_links, wayfinder_tools
+from mesh.orchestrator import interaction_agent, trip_recap, upload_links, wayfinder_tools
 from mesh.orchestrator.letsfg_tools import book_flight
 
 MONGO_URL = os.environ.get('ADIYAN_MONGO_URL', 'mongodb://localhost:27017')
@@ -428,6 +428,31 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         ) + f'Upload your documents here: {link}'
     else:
         profile = await infer_profile(chat_history, documents)
+
+        # Interpret each incoming turn against the settled profile before
+        # choosing the next workflow. This routes questions separately from
+        # trip planning and lets an explicit request for ideas unlock
+        # destination discovery without discarding the other constraints.
+        interaction = await interaction_agent.interpret_interaction(text, profile, chat_history)
+        if interaction.intent == 'ASK_QUESTION':
+            answer_prompt = (
+                "Answer the customer's latest question using only the settled profile and conversation below. "
+                "Do not invent financial facts, prices, availability or travel details. If the evidence is missing, "
+                "say what is unknown and ask one focused question.\n\n"
+                f"PROFILE:\n{wayfinder_tools._format_profile(profile)}\n\n"
+                f"CONVERSATION:\n{interaction_agent._format_history(chat_history)}\n\n"
+                f"QUESTION: {text}"
+            )
+            reply = await meta_model_client.ask_text(AGENT_ID, 'answer_customer_question', answer_prompt)
+            append_turn(identity_key, 'wayfinder', reply)
+            return reply
+
+        if interaction.intent == 'EXPLORE_OPTIONS':
+            profile.destination_flexible = True
+            profile.missing_info = [
+                item for item in profile.missing_info
+                if not any(term in item.lower() for term in ('destination', 'where to go', 'place to visit'))
+            ]
 
         recap_prompt_reply = await _maybe_detect_trip_completion(identity_key, text, profile)
         if recap_prompt_reply is not None:
