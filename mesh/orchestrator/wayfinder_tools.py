@@ -207,7 +207,7 @@ _RECOMMEND_PROMPT = """You are Wayfinder, planning an actual trip for a customer
 
 {profile_summary}
 
-Today's date is {today}. Decide what to look up next to put together a real recommendation - typically flights first, then a hotel at the destination, though use your judgment about order and whether a web_search for destination-specific advice is also worth doing. For flights, prefer search_flights_letsfg over search_flights: only a search_flights_letsfg offer can actually be booked later through this chat if the customer says yes, so use search_flights (Kiwi, link-out only) only if search_flights_letsfg genuinely fails or returns nothing useful. You have already made these tool calls this session:
+Today's date is {today}. Use the creative discovery and evaluation evidence already gathered. If the destination is flexible, choose the strongest evidence-backed destination direction that fits the family's interests; if fixed, do not change it. Then look up actual transport and accommodation options. Decide what to look up next to put together a real recommendation - typically flights first, then a hotel at the destination. For flights, prefer search_flights_letsfg over search_flights: only a search_flights_letsfg offer can actually be booked later through this chat if the customer says yes, so use search_flights (Kiwi, link-out only) only if search_flights_letsfg genuinely fails or returns nothing useful. You have already made these tool calls this session:
 
 {calls_so_far}
 
@@ -221,9 +221,77 @@ Here is everything your research tool calls actually found:
 
 {calls_so_far}
 
-Write a short, concrete recommendation grounded ONLY in the real data above - cite the actual prices and booking links that came back, never invent a number, hotel, or flight that wasn't in the tool results above. If a tool call failed or found nothing, say so plainly rather than making something up to fill the gap. If predicted period windows or a kids' school calendar were given in the profile above, prefer picking/confirming travel dates that avoid both, within whatever the stated travel_window/leave dates actually allow - if every date in the leave window conflicts with one of them, say so plainly rather than silently picking a date that conflicts. Keep it to a few short paragraphs, suitable to send over WhatsApp.
+Write a short, concrete, creative recommendation grounded ONLY in the research above - explain why the discovered experiences fit the family's interests and cite actual prices and booking links that came back. Never invent a number, hotel, attraction fact, or flight that wasn't in the tool results above. If attraction costs or opening hours were not verified, say so and label them as items to confirm. If a tool call failed or found nothing, say so plainly rather than making something up to fill the gap. If predicted period windows or a kids' school calendar were given in the profile above, prefer picking/confirming travel dates that avoid both, within whatever the stated travel_window/leave dates actually allow - if every date in the leave window conflicts with one of them, say so plainly rather than silently picking a date that conflicts. Keep it to a few short paragraphs, suitable to send over WhatsApp.
 
 If (and only if) a search_flights_letsfg call above returned a real offer_id for the flight you are actually recommending, also fill in bookable_offer with that exact search_id/offer_id/price/currency, PLUS the exact adults/children you passed into that same search_flights_letsfg call (a booking must match the same party size or it's rejected) - and end recommendation_text by asking the customer to reply yes to book it. Leave bookable_offer null if you're recommending a Kiwi (search_flights) result instead, or if you're not confident enough in a specific offer to recommend booking it yet - never invent a search_id/offer_id/adults/children that didn't come from a real tool result above."""
+
+
+class ExperienceSearchTask(BaseModel):
+    destination: str = Field(description='A destination or specific local area to investigate. Must respect a fixed destination if the customer named one.')
+    rationale: str = Field(description='Why this destination or experience fits the family interests.')
+    search_task: str = Field(description='A concrete live-web research query for family-friendly experiences, unusual attractions, practical logistics and indicative costs. Do not ask the search engine to invent prices.')
+
+
+class CreativeDiscoveryPlan(BaseModel):
+    tasks: List[ExperienceSearchTask] = Field(description='Up to three distinct research directions. If the destination is fixed, investigate different experience themes there. If destination_flexible is true, explore genuinely different destinations that fit the family.')
+
+
+class ExperienceEvaluation(BaseModel):
+    interest_fit: int = Field(ge=1, le=5, description='How well the evidence matches the family interests, 1 to 5.')
+    novelty: int = Field(ge=1, le=5, description='How distinctive and non-generic the discovered experiences are, 1 to 5.')
+    practicality: int = Field(ge=1, le=5, description='How well distance, dates, family suitability and logistics are supported, 1 to 5.')
+    evidence_gaps: List[str] = Field(default_factory=list, description='Important facts not verified by research, especially costs, opening days, distance or availability.')
+    next_search_task: str = Field(default='', description='One additional targeted research query if a material evidence gap can be resolved. Empty when no useful additional search is needed.')
+    evaluation_summary: str = Field(description='Brief critique of what is promising and what remains uncertain. Do not claim affordability without a deterministic budget.')
+
+
+async def discover_experiences(profile) -> tuple[str, str]:
+    """Muse Spark proposes a small set of interest-led research directions;
+    Meta web search then grounds them in real-world evidence. The model
+    proposes what to investigate, but search results remain the evidence."""
+    destination = profile.destination_hint or '(no fixed destination)'
+    flexibility = bool(getattr(profile, 'destination_flexible', False))
+    prompt = f"""You are Wayfinder's creative experience-discovery planner.
+
+Family profile:
+{_format_profile(profile)}
+
+Destination: {destination}
+Destination flexibility explicitly stated by customer: {flexibility}
+
+Create at most three genuinely useful research directions.
+- If a destination is named and destination_flexible is false, keep research within that destination and nearby areas; do not replace it.
+- If destination_flexible is true, suggest distinct destinations that make sense from the stated origin, dates, family interests and financial signal. Do not assume a numeric trip budget from average monthly surplus.
+- Discover experiences, not just famous tourist destinations: science/aviation/technology, nature, culture, local food, hands-on activities and lesser-known attractions where relevant to stated interests.
+- Explain why each direction fits this particular family's stated interests.
+- Search queries must ask for source-backed attractions, family suitability, travel time/distance, opening days and published prices where available. Never fabricate any of those facts.
+- Prefer variety across the three directions rather than three versions of the same generic destination.
+"""
+    plan = await meta_model_client.ask_schema(AGENT_ID, 'creative_discovery_plan', prompt, CreativeDiscoveryPlan)
+    findings = []
+    for task in plan.tasks[:3]:
+        result = await meta_model_client.web_search(AGENT_ID, 'experience_discovery', task.search_task)
+        findings.append(
+            f"DISCOVERY: {task.destination}\nWHY IT MAY FIT: {task.rationale}\n"
+            f"RESEARCH QUERY: {task.search_task}\nGROUNDED FINDINGS:\n{result}"
+        )
+    return '\n\n'.join(findings) if findings else '(No experience discovery results.)', destination
+
+
+async def evaluate_experience_research(profile, research: str) -> ExperienceEvaluation:
+    """A separate critique pass identifies evidence gaps and may request one
+    targeted follow-up search. It cannot approve affordability."""
+    prompt = f"""Evaluate this Wayfinder experience research against the family's interests and trip context.
+
+PROFILE:
+{_format_profile(profile)}
+
+RESEARCH EVIDENCE:
+{research}
+
+Score interest fit, novelty and practicality from 1 to 5. List material evidence gaps. If one additional search can resolve a meaningful gap, provide exactly one targeted search query; otherwise leave it empty.
+Do not infer prices, availability, opening hours or affordability. The deterministic budget engine, not you, owns affordability."""
+    return await meta_model_client.ask_schema(AGENT_ID, 'evaluate_experience_research', prompt, ExperienceEvaluation)
 
 
 class BookableOffer(BaseModel):
@@ -269,7 +337,7 @@ def _format_profile(profile) -> str:
         f"- Preferences: {profile.preferences_summary or '(none stated)'}",
         f"- Budget: {profile.budget_signal or '(not grounded)'}",
         f"- From: {profile.origin_city or '(unknown)'}",
-        f"- To: {profile.destination_hint or '(unknown)'}",
+        f"- To: {profile.destination_hint or ('open to discovery' if getattr(profile, 'destination_flexible', False) else '(unknown)')}",
         f"- When: {profile.travel_window or '(unknown)'}",
     ]
     if getattr(profile, 'last_period_start', '') and getattr(profile, 'average_cycle_length_days', None):
@@ -297,6 +365,16 @@ async def recommend_trip(profile) -> TripRecommendation:
     book - never a model's free-text reconstruction of it."""
     profile_summary = _format_profile(profile)
     calls_so_far: list[str] = []
+
+    # Start with divergent, interest-led experience discovery rather than
+    # assuming the customer already knows which destination to search.
+    discovery, _ = await discover_experiences(profile)
+    calls_so_far.append(f'[creative experience discovery]\\n{discovery}')
+    evaluation = await evaluate_experience_research(profile, discovery)
+    calls_so_far.append(f'[experience evaluation]\\n{evaluation.model_dump_json(indent=2)}')
+    if evaluation.next_search_task:
+        follow_up = await meta_model_client.web_search(AGENT_ID, 'experience_research_replan', evaluation.next_search_task)
+        calls_so_far.append(f'[targeted follow-up research: {evaluation.next_search_task}]\\n{follow_up}')
 
     for _ in range(3):
         prompt = _RECOMMEND_PROMPT.format(
