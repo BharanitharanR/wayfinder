@@ -1,9 +1,10 @@
 """
 Generic document-upload link for Adiyan's intake flows - lets a customer
 registered via WhatsApp open a branded Adiyan web page in any browser and
-submit multiple documents in one go (any type Docling handles: PDF,
-images, PPTX, ...), including a password for any PDF that's open-
-protected. No per-vertical branding here on purpose (see server.py's
+submit multiple documents in one go (PDF or image - whatever Meta's
+Model API can read, see _extract_text below), including a password for
+any PDF that's open-protected. No per-vertical branding here on purpose
+(see server.py's
 wiring comment) - this page is reused by whichever agent needs a
 customer to hand over documents next.
 
@@ -33,7 +34,10 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse
 from starlette.routing import Route
 
+from mesh.lib import meta_model_client
 from mesh.orchestrator import short_links
+
+_AGENT_ID = 'wayfinder_upload_links'
 
 MONGO_URL = os.environ.get('ADIYAN_MONGO_URL', 'mongodb://localhost:27017')
 MONGO_DB_NAME = os.environ.get('ADIYAN_MONGO_DB_DATA', 'adiyan')
@@ -121,15 +125,18 @@ def get_confirmed_phone(phone: str) -> Optional[str]:
     return doc['confirmed_phone'] if doc else None
 
 
-def _extract_text(filename: str, content: bytes, password: Optional[str]) -> dict:
+async def _extract_text(filename: str, content: bytes, password: Optional[str]) -> dict:
     """Returns {'status': 'ok' | 'needs_password' | 'wrong_password' |
     'error', 'text': extracted markdown (empty unless status == 'ok'),
     'error': str}.
 
-    PDFs get a decrypt pass first (Docling can't itself open an
-    encrypted PDF) - everything else goes straight to Docling, same
-    DocumentStream-from-bytes call mesh/memory/memory_index.py's
-    ingest_document() already uses for ordinary WhatsApp uploads."""
+    PDFs get a decrypt pass first (plain decryption, pypdf, not a model
+    call) - everything else goes straight to Meta's Model API
+    (meta_model_client.extract_document_text), which reads the file
+    itself (PDF/image) and returns its text. This used to be a local
+    Docling/RapidOCR pass; that's a local, non-Meta model, which the Meta
+    AI Developer Hackathon's rules explicitly disallow for a submitted
+    project's runtime calls - see extract_document_text's own docstring."""
     if filename.lower().endswith('.pdf'):
         from pypdf import PdfReader, PdfWriter
 
@@ -152,13 +159,8 @@ def _extract_text(filename: str, content: bytes, password: Optional[str]) -> dic
             content = buf.getvalue()
 
     try:
-        from docling.document_converter import DocumentConverter
-        from docling_core.types.io import DocumentStream
-
-        converter = DocumentConverter()
-        result = converter.convert(DocumentStream(name=filename, stream=io.BytesIO(content)))
-        markdown = result.document.export_to_markdown()
-        return {'status': 'ok', 'text': markdown, 'error': ''}
+        text = await meta_model_client.extract_document_text(_AGENT_ID, 'extract_document', filename, content)
+        return {'status': 'ok', 'text': text, 'error': ''}
     except Exception as e:
         return {'status': 'error', 'text': '', 'error': str(e)}
 
@@ -391,7 +393,7 @@ async def _upload_submit(request: Request):
         safe_name = f'{int(time.time() * 1000)}_{Path(upload.filename).name}'
         (customer_dir / safe_name).write_bytes(content)
 
-        outcome = _extract_text(upload.filename, content, password)
+        outcome = await _extract_text(upload.filename, content, password)
         _db()[UPLOADS_COLLECTION].insert_one({
             'phone': phone,
             'filename': upload.filename,

@@ -20,8 +20,10 @@ wayfinder_session.py/wayfinder_tools.py needing to change shape.
 Logs through the same mesh/lib/llm_log.py every other agent's calls go
 through - one central log, this backend included, not a second silent path.
 """
+import base64
 import json
 import logging
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any, List, Optional, Type
@@ -77,6 +79,51 @@ def _usage_dict(usage) -> Optional[dict]:
     if output_tokens is None:
         output_tokens = usage.completion_tokens
     return {'input_tokens': input_tokens, 'output_tokens': output_tokens}
+
+
+_EXTRACT_DOCUMENT_PROMPT = (
+    "Extract the complete text content of this document, verbatim, as plain "
+    "markdown - every line item, date, amount, and label exactly as written. "
+    "Do not summarize, interpret, or omit anything; this is for a downstream "
+    "step that reads the raw content itself. If the document is a scanned "
+    "image with handwriting or low-quality print, transcribe your best "
+    "reading of it rather than giving up."
+)
+
+
+async def extract_document_text(agent_id: str, stage: str, filename: str, content: bytes) -> str:
+    """Document OCR/extraction step - reads a PDF/image straight off Muse
+    Spark's own multimodal input (Model API's 'File handling'/'Image
+    understanding' docs: a PDF is converted server-side to text plus
+    per-page images and both reach the model), not a local OCR model.
+
+    This replaces what used to be a local Docling/RapidOCR pass in
+    mesh/orchestrator/upload_links.py's _extract_text - the Meta AI
+    Developer Hackathon requires every model call this project makes at
+    runtime to be a Meta model, and a local OCR model is explicitly called
+    out as not allowed, however it's run. Sent inline as base64 (Model
+    API's 'file' content block - see 'File handling'), not uploaded via
+    the Files API, since Wayfinder has no reuse case for the same
+    document across requests - it's parsed once at upload time and the
+    resulting text is what gets stored."""
+    mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    file_data = f'data:{mime_type};base64,{base64.b64encode(content).decode()}'
+    model = DEFAULT_MODEL
+    messages = [{
+        'role': 'user',
+        'content': [
+            {'type': 'text', 'text': _EXTRACT_DOCUMENT_PROMPT},
+            {'type': 'file', 'file': {'filename': filename, 'file_data': file_data}},
+        ],
+    }]
+    try:
+        response = _get_client().chat.completions.create(model=model, messages=messages)
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'document', f'meta:{model}', f'[document: {filename}]', None, error=str(e))
+        raise
+    text = response.choices[0].message.content or ''
+    llm_log.log_call(agent_id, stage, 'document', f'meta:{model}', f'[document: {filename}]', text, usage=_usage_dict(response.usage))
+    return text
 
 
 async def ask_text(agent_id: str, stage: str, prompt: str, system: Optional[str] = None) -> str:

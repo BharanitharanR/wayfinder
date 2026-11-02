@@ -9,8 +9,10 @@ from live searches.
 
 Every bit of reasoning Wayfinder does - reading your messages, deciding
 what's still missing, choosing which tool to call, searching the live web,
-and writing the final recommendation - runs on **Meta's Model API (Muse
-Spark)**. Nothing else.
+reading an uploaded PDF statement, and writing the final recommendation -
+runs on **Meta's Model API (Muse Spark)**. Nothing else - including
+document extraction, which is Muse Spark reading the file directly, not a
+local OCR model.
 
 This repo is Wayfinder on its own: everything it takes to run the agent
 end to end from a terminal, with no WhatsApp, no other agents, and no
@@ -125,9 +127,9 @@ up, not a real person's data:
   to what a real statement actually looks like.
 
 When Wayfinder prints an upload link (first message, or `/link`), open it
-in a browser and upload either file - that's the real upload/OCR path
-(Docling), not a shortcut, so the extracted text Wayfinder reasons over is
-genuinely read from the PDF you give it.
+in a browser and upload either file - that's the real upload/extraction
+path (Muse Spark reading the PDF directly), not a shortcut, so the text
+Wayfinder reasons over is genuinely read from the file you give it.
 
 ## Where the Meta model is actually called
 
