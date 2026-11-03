@@ -168,7 +168,7 @@ def build_profile(classified: List[dict]) -> dict:
     monthly_surplus = float(_money(sum(surplus_values) / len(surplus_values))) if surplus_values else None
     ordered_surplus = sorted(surplus_values)
     p25_surplus = ordered_surplus[math.floor((len(ordered_surplus) - 1) * 0.25)] if ordered_surplus else None
-    median_surplus = ordered_surplus[len(ordered_surplus) // 2] if ordered_surplus else None
+    median_surplus = (ordered_surplus[len(ordered_surplus) // 2] if len(ordered_surplus) % 2 else (ordered_surplus[len(ordered_surplus) // 2 - 1] + ordered_surplus[len(ordered_surplus) // 2]) / 2) if ordered_surplus else None
     total_income = sum((b['income'] for b in monthly.values()), Decimal('0'))
     total_essential = sum((b['essential'] for b in monthly.values()), Decimal('0'))
     total_discretionary = sum((b['discretionary'] for b in monthly.values()), Decimal('0'))
