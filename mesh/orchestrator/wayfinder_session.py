@@ -678,15 +678,44 @@ async def handle_customer_message(chat_id: str, text: str, *, upload_instruction
                     f"typical trip duration, indicative total family costs, and travel time. "
                     f"If departure city is unknown, do not invent flight durations or routes; "
                     f"give destination-side comparison and clearly state that travel time from origin "
-                    f"needs the departure city. Use current web research and distinguish estimates "
-                    f"from verified prices. Do not book anything."
+                    f"needs the departure city. Use current web research. Every factual section must "
+                    f"carry inline source IDs such as [S1] that match the Sources list. Never say "
+                    f"'verified', 'confirmed', or 'available' unless the cited source directly "
+                    f"supports that exact claim; search snippets and general articles are not live "
+                    f"price or availability checks. Label costs as estimates unless a dated live "
+                    f"quote for the exact family, dates and itinerary was returned. If no source "
+                    f"citations are returned, explicitly say the comparison is unverified. Do not book anything."
                 )
+                financial = _best_financial_profile(documents)
+                if financial is None:
+                    affordability = (
+                        "HOUSEHOLD AFFORDABILITY: No usable transaction profile is available. "
+                        "Do not claim any destination is affordable or infer a travel budget."
+                    )
+                elif not financial.get('trustworthy'):
+                    affordability = (
+                        "HOUSEHOLD AFFORDABILITY: A statement was processed, but only "
+                        f"{round(financial.get('classified_debit_ratio', 0) * 100)}% of relevant "
+                        "debits were classified. The surplus is not reliable enough for an "
+                        "affordability decision. Do not infer a safe trip budget."
+                    )
+                else:
+                    affordability = (
+                        "HOUSEHOLD AFFORDABILITY: Statement cash flow is available below, but "
+                        "a safe trip budget has NOT been calculated. Do not equate monthly surplus "
+                        "or statement closing balance with disposable travel money. A safe budget "
+                        "still requires customer-confirmed current liquid balance, reserve horizon, "
+                        "upcoming obligations, months until departure, and savings capture rate. "
+                        "Use the statement only as supporting evidence and say affordability remains "
+                        "unassessed until those inputs are confirmed.\n"
+                        + format_household_financial_overview(financial)
+                    )
                 follow_up = (
                     "What city would you be traveling from? I can then make the travel-time comparison more precise."
                     if not profile.origin_city else
                     "Which destination would you like to explore further?"
                 )
-                reply = comparison + "\n\n" + follow_up
+                reply = comparison + "\n\n" + affordability + "\n\n" + follow_up
                 append_turn(identity_key, 'wayfinder', reply)
                 return reply
         if interaction.intent == 'EXPLORE_OPTIONS':
