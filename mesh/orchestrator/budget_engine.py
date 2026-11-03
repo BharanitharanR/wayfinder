@@ -21,13 +21,12 @@ same keyword-rule-first-match-wins classifier, same "unknown debits are
 never silently essential/discretionary" rule, same available_savings +
 future_savings formula.
 
-This module does NOT attempt the full available_savings/future_savings
-trip-budget figure yet - that needs current_balance, emergency_reserve,
-upcoming_obligations, and months_until_departure, none of which Wayfinder
-collects from the customer today. compute_financial_profile() stops at a
-grounded, auditable income/expense/surplus read (what budget_signal
-needed to stop being free LLM prose) and flags low-confidence profiles
-plainly rather than feeding a shaky number into a formula anyway.
+This module computes a grounded household cash-flow profile and exposes a
+separate deterministic safe-travel-budget function. It deliberately does
+not calculate that travel allocation automatically: current liquid balance,
+reserve horizon, upcoming obligations, months until departure and the
+surplus-capture policy must be explicitly supplied or confirmed. Missing
+inputs produce INSUFFICIENT_DATA rather than a guessed budget.
 """
 import re
 from collections import defaultdict
