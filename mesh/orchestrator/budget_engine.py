@@ -32,6 +32,7 @@ plainly rather than feeding a shaky number into a formula anyway.
 import re
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
+import math
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -135,7 +136,7 @@ def build_profile(classified: List[dict]) -> dict:
     known income and known-expense read, and to report what fraction of
     total debit value was actually classified, not just leave unknown
     debits invisible in a total."""
-    monthly = defaultdict(lambda: {'income': Decimal('0'), 'essential': Decimal('0'), 'discretionary': Decimal('0'), 'obligation': Decimal('0'), 'unknown_debit': Decimal('0')})
+    monthly = defaultdict(lambda: {'income': Decimal('0'), 'essential': Decimal('0'), 'discretionary': Decimal('0'), 'obligation': Decimal('0'), 'investment_savings': Decimal('0'), 'transfer': Decimal('0'), 'unknown_debit': Decimal('0'), 'category_spend': defaultdict(lambda: Decimal('0'))})
     for t in classified:
         month = t['date'][:7]
         bucket = monthly[month]
@@ -144,24 +145,44 @@ def build_profile(classified: List[dict]) -> dict:
             if t['category'] in ('SALARY', 'BUSINESS_INCOME', 'OTHER_VERIFIED_INCOME'):
                 bucket['income'] += amt
         else:
-            key = {'ESSENTIAL': 'essential', 'DISCRETIONARY': 'discretionary', 'OBLIGATION': 'obligation'}.get(t['category'], 'unknown_debit')
+            key = {'ESSENTIAL': 'essential', 'DISCRETIONARY': 'discretionary', 'OBLIGATION': 'obligation', 'INVESTMENT': 'investment_savings', 'TRANSFER': 'transfer'}.get(t['category'], 'unknown_debit')
             bucket[key] += amt
+            if key in ('essential', 'discretionary', 'obligation'):
+                bucket['category_spend'][t.get('subcategory') or t['category']] += amt
 
-    total_debit = sum(_money(t['amount']) for t in classified if t['direction'] == 'debit')
+    total_debit = sum(_money(t['amount']) for t in classified if t['direction'] == 'debit' and t['category'] not in ('TRANSFER', 'INVESTMENT'))
     total_unknown_debit = sum(b['unknown_debit'] for b in monthly.values())
     classified_debit_ratio = float(1 - (total_unknown_debit / total_debit)) if total_debit else 0.0
 
     surplus_values = []
+    category_totals = defaultdict(lambda: Decimal('0'))
     for month, b in monthly.items():
         known_expenses = b['essential'] + b['discretionary'] + b['obligation']
+        for category, amount in b['category_spend'].items():
+            category_totals[category] += amount
         if b['income'] or known_expenses:
             surplus_values.append(b['income'] - known_expenses)
     monthly_surplus = float(_money(sum(surplus_values) / len(surplus_values))) if surplus_values else None
+    ordered_surplus = sorted(surplus_values)
+    p25_surplus = ordered_surplus[math.floor((len(ordered_surplus) - 1) * 0.25)] if ordered_surplus else None
+    median_surplus = ordered_surplus[len(ordered_surplus) // 2] if ordered_surplus else None
+    total_income = sum((b['income'] for b in monthly.values()), Decimal('0'))
+    total_essential = sum((b['essential'] for b in monthly.values()), Decimal('0'))
+    total_discretionary = sum((b['discretionary'] for b in monthly.values()), Decimal('0'))
+    total_obligations = sum((b['obligation'] for b in monthly.values()), Decimal('0'))
 
     return {
         'months_analyzed': len(monthly),
-        'monthly': {m: {k: float(v) for k, v in b.items()} for m, b in monthly.items()},
+        'monthly': {m: {k: ({name: float(value) for name, value in v.items()} if k == 'category_spend' else float(v)) for k, v in b.items()} for m, b in monthly.items()},
+        'total_verified_income': float(_money(total_income)),
+        'average_monthly_income': float(_money(total_income / len(monthly))) if monthly else None,
+        'average_monthly_essential_expenses': float(_money(total_essential / len(monthly))) if monthly else None,
+        'average_monthly_discretionary_expenses': float(_money(total_discretionary / len(monthly))) if monthly else None,
+        'average_monthly_obligations': float(_money(total_obligations / len(monthly))) if monthly else None,
         'average_monthly_surplus': monthly_surplus,
+        'median_monthly_surplus': None if median_surplus is None else float(_money(median_surplus)),
+        'conservative_monthly_surplus_p25': None if p25_surplus is None else float(_money(p25_surplus)),
+        'classified_expense_totals': {k: float(_money(v)) for k, v in category_totals.items()},
         'classified_debit_ratio': round(classified_debit_ratio, 3),
         'trustworthy': classified_debit_ratio >= MIN_CLASSIFIED_DEBIT_RATIO and monthly_surplus is not None,
     }
@@ -178,6 +199,37 @@ def calculate_trip_budget(*, current_balance, emergency_reserve, upcoming_obliga
         'future_savings': float(_money(future)),
         'recommended_trip_budget': float(_money(available + future)),
     }
+
+
+def calculate_safe_travel_budget(*, current_liquid_balance, essential_monthly_expenses, reserve_months, upcoming_obligations, conservative_monthly_surplus, months_until_departure, savings_capture_rate) -> dict:
+    \"\"\"Calculate the travel-only allocation from explicit, customer-grounded inputs.
+
+    This function intentionally has no guessed defaults: current liquid balance,
+    reserve horizon, upcoming obligations, time to departure and capture rate
+    must be supplied by a trusted profile or confirmed by the customer.
+    \"\"\"
+    required = (current_liquid_balance, essential_monthly_expenses, reserve_months,
+                upcoming_obligations, conservative_monthly_surplus,
+                months_until_departure, savings_capture_rate)
+    if any(value is None for value in required):
+        return {'status': 'INSUFFICIENT_DATA', 'safe_travel_budget': None,
+                'missing_inputs': [name for name, value in zip(
+                    ('current_liquid_balance', 'essential_monthly_expenses', 'reserve_months',
+                     'upcoming_obligations', 'conservative_monthly_surplus',
+                     'months_until_departure', 'savings_capture_rate'), required) if value is None]}
+    rate = Decimal(str(savings_capture_rate))
+    if rate < 0 or rate > 1:
+        raise ValueError('savings_capture_rate must be between 0 and 1')
+    if Decimal(str(reserve_months)) < 0 or Decimal(str(months_until_departure)) < 0:
+        raise ValueError('reserve_months and months_until_departure cannot be negative')
+    reserve = _money(essential_monthly_expenses) * Decimal(str(reserve_months))
+    available_now = max(Decimal('0'), _money(current_liquid_balance) - reserve - _money(upcoming_obligations))
+    future_contribution = max(Decimal('0'), _money(conservative_monthly_surplus)) * Decimal(str(months_until_departure)) * rate
+    return {'status': 'CALCULATED', 'emergency_reserve': float(_money(reserve)),
+            'available_liquid_savings': float(_money(available_now)),
+            'future_travel_contribution': float(_money(future_contribution)),
+            'safe_travel_budget': float(_money(available_now + future_contribution)),
+            'savings_capture_rate': float(rate)}
 
 
 def evaluate_trip_affordability(*, estimated_trip_cost, safe_trip_budget, search_exhausted=False) -> dict:
