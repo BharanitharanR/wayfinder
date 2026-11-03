@@ -64,7 +64,7 @@ _NORMALIZE_PROMPT = """Here is the extracted text of a bank/financial statement 
 
 {statement_text}
 
-List every transaction actually present, in order, as structured data. Each transaction needs its date, its description exactly as written, its amount as a positive number, and whether it was money in (credit) or money out (debit). Do not summarize, merge rows, or invent a transaction that isn't there - if the statement has 40 rows, return 40 transactions."""
+List every transaction actually present, in order, as structured data. Each transaction needs its date, its description exactly as written, its amount as a positive number, and whether it was money in (credit) or money out (debit). Also extract the statement's closing/ending balance only when explicitly printed; otherwise return null. Do not treat that balance as disposable cash. Do not summarize, merge rows, or invent a transaction that isn't there - if the statement has 40 rows, return 40 transactions."""
 
 
 def _is_statement_like(text: str) -> bool:
@@ -190,7 +190,7 @@ def build_profile(classified: List[dict]) -> dict:
     }
 
 
-def calculate_trip_budget(*, current_balance, emergency_reserve, upcoming_obligations, conservative_monthly_surplus, months_until_departure, savings_capture_rate=0.70) -> dict:
+def calculate_trip_budget(*, current_balance, emergency_reserve, upcoming_obligations, conservative_monthly_surplus, months_until_departure, savings_capture_rate) -> dict:
     """Unchanged from the prototype's budget.py - the one part of it that
     was already correct: pure arithmetic, no LLM, auditable."""
     rate = Decimal(str(savings_capture_rate))
@@ -293,4 +293,5 @@ async def compute_financial_profile(agent_id: str, statement_text: str) -> Optio
     classified = classify_transactions(normalized.transactions)
     profile = build_profile(classified)
     profile['currency'] = normalized.currency
+    profile['statement_closing_balance'] = normalized.closing_balance
     return profile
