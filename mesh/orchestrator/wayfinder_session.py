@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from pymongo import ASCENDING, MongoClient
 
 from mesh.lib import meta_model_client
-from mesh.orchestrator import interaction_agent, trip_recap, upload_links, wayfinder_tools
+from mesh.orchestrator import interaction_agent, letsfg_tools, trip_recap, upload_links, wayfinder_tools
 from mesh.orchestrator.letsfg_tools import book_flight
 
 MONGO_URL = os.environ.get('ADIYAN_MONGO_URL', 'mongodb://localhost:27017')
@@ -362,6 +362,21 @@ def _get_pending_booking(identity_key: str) -> Optional[Dict[str, Any]]:
     return _db()[PENDING_BOOKING_COLLECTION].find_one({'phone': identity_key, 'status': {'$in': ['offered', 'awaiting_name']}})
 
 
+def _get_unresolved_booked_flight(identity_key: str) -> Optional[Dict[str, Any]]:
+    """A booking that reached 'booked' (the booking API call was made)
+    but whose outcome hasn't been reported to the customer in chat yet -
+    distinct from _get_pending_booking's pre-booking offer/name states.
+    Deliberately keyed on `reported`, not on whether booking_state is
+    already terminal: the state can turn terminal from an out-of-band
+    check (an operator polling LetsFG directly) before the customer's
+    own chat ever sees that outcome, and that result still needs to be
+    delivered to them once, in their own conversation, the first time
+    they send anything after it resolves."""
+    return _db()[PENDING_BOOKING_COLLECTION].find_one({
+        'phone': identity_key, 'status': 'booked', 'reported': {'$ne': True},
+    })
+
+
 def _save_pending_booking(identity_key: str, offer) -> None:
     """One pending offer per customer - a new recommendation replaces
     whatever offer (if any) was pending before, since a customer who got
@@ -410,13 +425,54 @@ async def _handle_pending_booking(identity_key: str, text: str, pending: Dict[st
         pending['search_id'], pending['offer_id'], name.given_name, name.family_name, contact_email,
         pending.get('adults', 1), pending.get('children', 0),
     )
-    _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {'status': 'booked'}})
+    _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {
+        'status': 'booked', 'booking_id': result.get('booking_id'), 'booking_state': result.get('state'),
+    }})
     reply_text = result['text']
     if result['state'] == 'completed' and result.get('charged_amount') is not None:
         # A real, confirmed figure - safe to add to the running trip cost
         # (trip_recap.add_expense's own docstring on why only confirmed
         # numbers ever land there, never an estimate).
         trip_recap.add_expense(identity_key, f'Flight - {pending["summary"]}', result['charged_amount'], result['currency'], 'flight_booking')
+        running = trip_recap.get_running_cost(identity_key)
+        totals = ', '.join(f'{amt:.2f} {cur}' for cur, amt in running['totals_by_currency'].items())
+        reply_text += f'\n\nRunning trip cost so far: {totals}'
+    return reply_text
+
+
+_TERMINAL_BOOKING_STATES = {'completed', 'failed', 'needs_attention'}
+
+
+async def _check_booked_flight_status(identity_key: str, pending: Dict[str, Any]) -> Optional[str]:
+    """Delivers a booking's outcome to the customer exactly once, the
+    next time they send any message after it's unresolved in chat
+    (LetsFG's sandbox bookings take 4-11 minutes, far longer than one
+    chat turn can wait on). If the stored state isn't already terminal,
+    polls LetsFG once first - cheap, and catches a booking that finished
+    since the last check. Returns a reply only once a terminal state is
+    actually known; otherwise None, so the caller falls through to
+    normal handling without pestering the customer on every message."""
+    booking_id = pending.get('booking_id')
+    if not booking_id:
+        return None
+    try:
+        status = await letsfg_tools._request('GET', f'/flights/bookings/{booking_id}')
+    except Exception:
+        # Can't reach LetsFG right now; fall back to whatever state was
+        # already cached (e.g. an operator checked it directly earlier)
+        # rather than silently reporting nothing forever.
+        if pending.get('booking_state') not in _TERMINAL_BOOKING_STATES:
+            return None
+        status = pending
+    _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {'booking_state': status.get('state') or pending.get('booking_state')}})
+    final_state = status.get('state') or pending.get('booking_state')
+    if final_state not in _TERMINAL_BOOKING_STATES:
+        return None
+
+    _db()[PENDING_BOOKING_COLLECTION].update_one({'phone': identity_key}, {'$set': {'reported': True}})
+    reply_text = status.get('message') or f"Booking {final_state}."
+    if final_state == 'completed' and status.get('charged_amount') is not None:
+        trip_recap.add_expense(identity_key, f'Flight - {pending["summary"]}', status['charged_amount'], status['currency'], 'flight_booking')
         running = trip_recap.get_running_cost(identity_key)
         totals = ', '.join(f'{amt:.2f} {cur}' for cur, amt in running['totals_by_currency'].items())
         reply_text += f'\n\nRunning trip cost so far: {totals}'
@@ -544,6 +600,13 @@ async def handle_customer_message(chat_id: str, text: str, *, upload_instruction
         if booking_reply is not None:
             append_turn(identity_key, 'wayfinder', booking_reply)
             return booking_reply
+
+    unresolved_booking = _get_unresolved_booked_flight(identity_key)
+    if unresolved_booking is not None:
+        status_reply = await _check_booked_flight_status(identity_key, unresolved_booking)
+        if status_reply is not None:
+            append_turn(identity_key, 'wayfinder', status_reply)
+            return status_reply
 
     recap_reply = await _handle_pending_recap(identity_key, text)
     if recap_reply is not None:

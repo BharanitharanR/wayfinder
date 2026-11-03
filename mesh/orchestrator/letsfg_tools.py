@@ -124,7 +124,6 @@ def _sandbox_placeholder_fields() -> dict:
     }
 
 
-@tool
 async def book_flight(
     search_id: str, offer_id: str, given_name: str, family_name: str, contact_email: str,
     adults: int = 1, children: int = 0,
