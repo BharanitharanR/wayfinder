@@ -27,7 +27,7 @@ tool, infer_profile() is the missing inference step.
 """
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 from pymongo import ASCENDING, MongoClient
@@ -488,7 +488,7 @@ async def _maybe_detect_trip_completion(identity_key: str, text: str, profile) -
     )
 
 
-async def handle_customer_message(chat_id: str, text: str, *, upload_instruction: Optional[str] = None) -> str:
+async def handle_customer_message(chat_id: str, text: str, *, upload_instruction: Optional[str] = None, progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None) -> str:
     """The actual intake/clarification loop - handle_message.py's new
     `vertical_id == 'wayfinder'` branch calls just this one function and
     uses its return value as the WhatsApp reply, the same shape every
@@ -736,7 +736,19 @@ async def handle_customer_message(chat_id: str, text: str, *, upload_instruction
         if profile.missing_info:
             reply = _missing_info_reply(profile.missing_info)
         else:
-            recommendation = await wayfinder_tools.recommend_trip(profile)
+            if progress_callback is not None:
+                try:
+                    event = {'type': 'stage_update', 'stage': 'UNDERSTANDING',
+                             'status': 'COMPLETED',
+                             'message': 'Your family preferences and trip constraints are assembled.'}
+                    delivered = progress_callback(event)
+                    if hasattr(delivered, '__await__'):
+                        await delivered
+                except Exception:
+                    pass
+            recommendation = await wayfinder_tools.recommend_trip(
+                profile, progress_callback=progress_callback
+            )
             reply = _RESEARCHING_PREFIX + recommendation.recommendation_text
             if recommendation.bookable_offer is not None:
                 _save_pending_booking(identity_key, recommendation.bookable_offer)
