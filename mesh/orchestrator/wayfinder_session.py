@@ -158,6 +158,9 @@ def format_household_financial_overview(profile: Optional[Dict[str, Any]]) -> st
     ratio = round(profile.get('classified_debit_ratio', 0) * 100)
     months = profile.get('months_analyzed', 0)
     lines = [f'Household cash-flow snapshot ({months} statement month(s), {ratio}% of relevant debits classified):']
+    closing_balance = profile.get('statement_closing_balance')
+    if closing_balance is not None:
+        lines.append(f'- Closing balance shown on statement: {currency} {closing_balance:,.2f} (not treated as travel money)')
     for label, key in (('Average monthly verified income', 'average_monthly_income'),
                        ('Average monthly essential expenses', 'average_monthly_essential_expenses'),
                        ('Average monthly discretionary expenses', 'average_monthly_discretionary_expenses'),
