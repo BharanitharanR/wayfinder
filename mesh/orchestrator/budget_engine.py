@@ -116,11 +116,13 @@ def classify_transactions(transactions: List[StatementTransaction]) -> List[dict
     for t in transactions:
         desc = t.description.upper()
         category = 'UNKNOWN'
+        subcategory = None
         for rule in rules:
             if any(term.upper() in desc for term in rule['contains']):
                 category = rule['category']
+                subcategory = rule.get('subcategory')
                 break
-        classified.append({'date': t.date, 'description': t.description, 'amount': t.amount, 'direction': t.direction, 'category': category})
+        classified.append({'date': t.date, 'description': t.description, 'amount': t.amount, 'direction': t.direction, 'category': category, 'subcategory': subcategory})
     return classified
 
 
