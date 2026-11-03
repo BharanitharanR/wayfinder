@@ -98,6 +98,8 @@ Rules:
 - Distinguish a new trip from a modification to the current trip.
 - For a modification, preserve every known constraint the customer did not change. Example: if they change Goa to Kerala, retain dates, origin, family size, budget and preferences.
 - A question about income, expenses, monthly surplus, spending categories or the uploaded statement is ANALYZE_FINANCES, not a trip request.
+- Treat ordinary information-seeking messages as ASK_QUESTION even when no trip or document exists yet. Examples: "who is this for?", "what can you do?", "how do I upload my statement?", "did you receive my file?", and questions about facts already shared.
+- For ASK_QUESTION, the application will inspect the settled profile, conversation history and uploaded records before replying. Do not route a question into CONTINUE_INTAKE just because trip fields are missing.
 - A question about a recommendation is usually ASK_QUESTION, not a new trip.
 - Requests for alternatives or destination ideas are EXPLORE_OPTIONS.
 - Requests to compare named or previously returned options are COMPARE_OPTIONS.
