@@ -71,13 +71,7 @@ class CustomerSnapshot(BaseModel):
 
 _SNAPSHOT_PROMPT = """You are reading everything known so far about one Wayfinder customer, to distill it into a settled profile.
 
-=== Conversation so far ===
-{chat_transcript}
-
-=== Extracted text from their uploaded documents ===
-{documents_text}
-
-Distill this into the customer's current profile. Only state what's actually supported by the text above - leave a field empty/null rather than guessing. For budget_signal, ground it in the uploaded statement text if present; don't invent a number. For origin_city, destination_hint, and travel_window, only fill these in if a specific city/place/date was actually stated - a mood or style ("beaches", "somewhere relaxing") is a preference, not a destination. Set destination_flexible=true ONLY when the customer explicitly invites Wayfinder to suggest destinations or says they have no fixed destination; otherwise false.
+Distill this into the customer's current profile. Only state what's actually supported by the text below - leave a field empty/null rather than guessing. For budget_signal, ground it in the uploaded statement text if present; don't invent a number. For origin_city, destination_hint, and travel_window, only fill these in if a specific city/place/date was actually stated - a mood or style ("beaches", "somewhere relaxing") is a preference, not a destination. Set destination_flexible=true ONLY when the customer explicitly invites Wayfinder to suggest destinations or says they have no fixed destination; otherwise false.
 
 Set has_female_traveler and has_kids from family composition as soon as known. NEVER ask for menstrual, period, fertility, or cycle information; it is not part of Wayfinder trip intake. School calendar details are optional: if the customer says the child is on holiday during the candidate travel period, accept that and do not ask for exact term dates. all_adults_leave_confirmed is true once every working adult's leave was named specifically for them.
 
@@ -85,7 +79,26 @@ Capture every named candidate destination in destination_options when the custom
 
 When every working adult's leave dates are stated, derive the overlapping available date range and put that overlap in travel_window. Do not ask for a separate travel window if it can be calculated from the named leave dates. If a date range is only a candidate window rather than confirmed trip dates, say so in summary.
 
-List only information genuinely needed for the NEXT useful action in missing_info. Comparing destinations can proceed with a shortlist, family composition and candidate date window even if the origin city is not yet known; if origin is unknown, qualify travel-time comparisons and ask for the departure city after giving useful initial comparison. Ask one focused question at a time. Never make the customer repeat information already stated."""
+List only information genuinely needed for the NEXT useful action in missing_info. Comparing destinations can proceed with a shortlist, family composition and candidate date window even if the origin city is not yet known; if origin is unknown, qualify travel-time comparisons and ask for the departure city after giving useful initial comparison. Ask one focused question at a time. Never make the customer repeat information already stated.
+
+=== Extracted text from their uploaded documents ===
+{documents_text}
+
+=== Conversation so far ===
+{chat_transcript}"""
+# Stable content first, volatile content last - Model API's own prompt-
+# caching docs (dev.meta.ai/docs/prompt-caching): caching matches from
+# the start of the prompt forward, so the instructions (identical on
+# every call, for every customer) and documents_text (stable for the
+# rest of a session once a statement's uploaded, changes only on a new
+# upload) both now sit ahead of chat_transcript, which is the one thing
+# that actually grows every single turn. Previously chat_transcript came
+# right after the opening line, which meant documents_text - despite its
+# own content never changing - never got a cache hit, because it was
+# never a true prefix: anything after the point where the transcript
+# diverges from the previous call is "new" to the cache regardless of
+# whether that specific block's own bytes changed. This reorder is pure
+# prompt-text movement, no instruction content or behavior changed.
 
 
 _client: Optional[MongoClient] = None
