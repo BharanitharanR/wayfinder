@@ -43,7 +43,7 @@ actual trip-matching step the original spec explicitly left as future
 work; research() below is a minimal, single-choice entry point for that,
 not a multi-turn ReAct loop.
 """
-from datetime import date, timedelta
+from datetime import date
 from typing import List, Optional
 
 from langchain_core.tools import tool
@@ -307,28 +307,6 @@ class BookableOffer(BaseModel):
 class TripRecommendation(BaseModel):
     recommendation_text: str = Field(description='The customer-facing recommendation message, suitable to send over WhatsApp as-is.')
     bookable_offer: Optional[BookableOffer] = Field(default=None, description='Set only when recommending a specific search_flights_letsfg offer the customer could book by replying yes. Null otherwise - never invented.')
-
-
-def predict_period_windows(last_period_start: str, cycle_length_days: int, period_length_days: int = 5, horizon_days: int = 90) -> List[str]:
-    """Pure local calendar-based prediction - no AI model, no external
-    service, nothing about this leaves the machine. Standard calendar-
-    method cycle prediction is just arithmetic (next period = last start
-    + cycle length); there's no reason sensitive health data like this
-    should ever touch a third-party API to compute something this
-    simple - see this session's own research into existing APIs/MCP
-    servers for this, all of which would mean sending it off-device.
-
-    Returns each predicted window as 'YYYY-MM-DD to YYYY-MM-DD', every
-    `cycle_length_days` from `last_period_start` out to `horizon_days` -
-    enough windows for a date-picking step to check a travel_window
-    against, without needing today's date passed in separately."""
-    start = date.fromisoformat(last_period_start)
-    windows = []
-    cursor = start
-    while (cursor - start).days <= horizon_days:
-        windows.append(f'{cursor.isoformat()} to {(cursor + timedelta(days=period_length_days - 1)).isoformat()}')
-        cursor += timedelta(days=cycle_length_days)
-    return windows
 
 
 def _format_profile(profile) -> str:
