@@ -234,9 +234,29 @@ def _parse_loose_date(text: str) -> Optional[Any]:
     photo's upload date within a couple of days, not parse every
     possible date phrasing."""
     from datetime import date
-    match = re.search(r'(\d{4})-(\d{2})-(\d{2})', text)
-    if match:
+    iso_dates = list(re.finditer(r'(\\d{4})-(\\d{2})-(\\d{2})', text))
+    if iso_dates:
+        match = iso_dates[-1]
         return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+
+    month_names = {
+        name: number for number, names in enumerate(
+            [(), ('jan', 'january'), ('feb', 'february'), ('mar', 'march'),
+             ('apr', 'april'), ('may',), ('jun', 'june'), ('jul', 'july'),
+             ('aug', 'august'), ('sep', 'sept', 'september'), ('oct', 'october'),
+             ('nov', 'november'), ('dec', 'december')],
+            0,
+        ) if names for name in names
+    }
+    natural = re.search(
+        r'([A-Za-z]{3,9})\\s+(\\d{1,2})(?:\\s*(?:-|–|to)\\s*(?:[A-Za-z]{3,9}\\s+)?(\\d{1,2}))?\\s*,?\\s+(\\d{4})',
+        text,
+    )
+    if natural:
+        month = month_names.get(natural.group(1).lower())
+        if month:
+            end_day = int(natural.group(3) or natural.group(2))
+            return date(int(natural.group(4)), month, end_day)
     return None
 
 
