@@ -448,7 +448,18 @@ async def _maybe_detect_trip_completion(identity_key: str, text: str, profile) -
     later message."""
     if trip_recap.get_any_recap(identity_key) is not None:
         return None
-    text_signal = await trip_recap.detect_text_completion(text)
+    lowered = text.strip().lower()
+    completion_language = any(term in lowered for term in (
+        'trip is over', 'trip is finished', 'trip is done', "trip's done",
+        'we are back', "we're back", 'we got back', 'back home',
+        'just landed', 'returned from our trip', 'holiday is over',
+        'vacation is over', 'we have returned',
+    ))
+    # The text classifier is only useful for likely completion messages.
+    # Photo completion is deterministic and must be checked independently
+    # on every eligible turn, even when the customer says nothing about
+    # the trip ending.
+    text_signal = await trip_recap.detect_text_completion(text) if completion_language else False
     photo_signal = trip_recap.detect_photo_completion(identity_key, profile.travel_window)
     if not (text_signal or photo_signal):
         return None
@@ -580,6 +591,11 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
             append_turn(identity_key, 'wayfinder', reply)
             return reply
 
+        recap_prompt_reply = await _maybe_detect_trip_completion(identity_key, text, profile)
+        if recap_prompt_reply is not None:
+            append_turn(identity_key, 'wayfinder', recap_prompt_reply)
+            return recap_prompt_reply
+
         # Before a phone is confirmed, the link has to be minted under
         # chat_id (confirmed_phone is None, so identity_key == chat_id
         # here too) - that's the only identity this contact has yet, and
@@ -620,16 +636,10 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
                 if not any(term in item.lower() for term in ('destination', 'where to go', 'place to visit'))
             ]
 
-        # Completion detection is costly and only relevant when the
-        # customer actually reports that a trip has ended.
-        completion_language = any(term in lowered for term in (
-            'trip is over', 'trip is finished', 'we are back', 'we got back',
-            'returned from our trip', 'holiday is over', 'vacation is over',
-        ))
-        recap_prompt_reply = (
-            await _maybe_detect_trip_completion(identity_key, text, profile)
-            if completion_language else None
-        )
+        # Check photo-based completion independently of the customer's
+        # wording; the helper only invokes the text classifier for likely
+        # completion phrases, so ordinary messages do not incur that call.
+        recap_prompt_reply = await _maybe_detect_trip_completion(identity_key, text, profile)
         if recap_prompt_reply is not None:
             append_turn(identity_key, 'wayfinder', recap_prompt_reply)
             return recap_prompt_reply
