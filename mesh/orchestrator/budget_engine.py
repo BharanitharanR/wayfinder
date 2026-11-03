@@ -204,12 +204,12 @@ def calculate_trip_budget(*, current_balance, emergency_reserve, upcoming_obliga
 
 
 def calculate_safe_travel_budget(*, current_liquid_balance, essential_monthly_expenses, reserve_months, upcoming_obligations, conservative_monthly_surplus, months_until_departure, savings_capture_rate) -> dict:
-    \"\"\"Calculate the travel-only allocation from explicit, customer-grounded inputs.
+    """Calculate the travel-only allocation from explicit, customer-grounded inputs.
 
     This function intentionally has no guessed defaults: current liquid balance,
     reserve horizon, upcoming obligations, time to departure and capture rate
     must be supplied by a trusted profile or confirmed by the customer.
-    \"\"\"
+    """
     required = (current_liquid_balance, essential_monthly_expenses, reserve_months,
                 upcoming_obligations, conservative_monthly_surplus,
                 months_until_departure, savings_capture_rate)
