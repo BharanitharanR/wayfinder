@@ -302,6 +302,49 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
     return result or 'web_search found nothing conclusive for that task.'
 
 
+
+async def generate_image(agent_id: str, stage: str, prompt: str, reference_images: List[tuple]) -> bytes:
+    """Generate a composed image with Muse Image, optionally guided by
+    uploaded trip photos. Reference images are passed as data URLs through
+    the Responses API; the returned image bytes are persisted by caller."""
+    _check_rate_limit()
+    content = [{'type': 'input_text', 'text': prompt}]
+    for filename, image_bytes in reference_images:
+        mime_type = mimetypes.guess_type(filename)[0] or 'image/jpeg'
+        data_url = f'data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}'
+        content.append({'type': 'input_image', 'image_url': data_url})
+    model = 'muse-image-1.0'
+    try:
+        response = _get_client().responses.create(
+            model=model,
+            input=[{'role': 'user', 'content': content}],
+            tools=[{
+                'type': 'image_generation',
+                'enable_web_search': False,
+                'enable_image_search': False,
+                'enable_shell': False,
+                'reasoning_strength': 'high',
+                'output_format': 'jpeg',
+            }],
+        )
+        image_item = next(
+            (item for item in response.output
+             if getattr(item, 'type', None) == 'image_generation_call'),
+            None,
+        )
+        if image_item is None or not getattr(image_item, 'result', None):
+            raise MetaModelError('Muse Image returned no generated image.')
+        image_bytes = base64.b64decode(image_item.result)
+    except Exception as e:
+        llm_log.log_call(agent_id, stage, 'image', f'meta:{model}', prompt, None, error=str(e))
+        raise
+    usage = _usage_dict(response.usage)
+    _record_usage(usage)
+    llm_log.log_call(agent_id, stage, 'image', f'meta:{model}', prompt, '[generated image]', usage=usage)
+    return image_bytes
+
+
+
 ASR_MODEL = 'muse-voice-transcribe-1.0'
 
 
