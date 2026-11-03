@@ -527,6 +527,17 @@ async def handle_customer_message(chat_id: str, text: str, *, upload_instruction
 
     append_turn(identity_key, 'customer', text)
 
+    if progress_callback is not None:
+        try:
+            event = {'type': 'stage_update', 'stage': 'UNDERSTANDING',
+                     'status': 'IN_PROGRESS',
+                     'message': 'Reading your message and the conversation so far.'}
+            delivered = progress_callback(event)
+            if hasattr(delivered, '__await__'):
+                await delivered
+        except Exception:
+            pass
+
     pending = _get_pending_booking(identity_key)
     if pending is not None:
         booking_reply = await _handle_pending_booking(identity_key, text, pending)
