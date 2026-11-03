@@ -1,3 +1,5 @@
+import asyncio
+import json
 import mimetypes
 import os
 import re
@@ -6,7 +8,7 @@ from uuid import UUID
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 from mesh.orchestrator import budget_engine, trip_recap, upload_links, wayfinder_session
 
@@ -94,6 +96,56 @@ async def chat(request):
     except Exception as exc:
         return JSONResponse({"error":f"Wayfinder request failed: {exc}"}, status_code=500)
 
+async def chat_stream(request):
+    """Stream customer-safe planning milestones, then the final chat reply."""
+    try:
+        phone = identity(request)
+        message = str((await request.json()).get("message", "")).strip()
+        if not message:
+            return JSONResponse({"error": "Message cannot be empty."}, status_code=400)
+        queue = asyncio.Queue()
+
+        async def on_progress(event):
+            await queue.put(event)
+
+        async def run_chat():
+            try:
+                reply = await wayfinder_session.handle_customer_message(
+                    phone, message, upload_instruction=_UPLOAD_INSTRUCTION,
+                    progress_callback=on_progress,
+                )
+                await queue.put({"type": "final", "reply": reply})
+            except Exception as exc:
+                await queue.put({"type": "error", "error": f"Wayfinder request failed: {exc}"})
+            finally:
+                await queue.put(None)
+
+        async def event_stream():
+            task = asyncio.create_task(run_chat())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+            finally:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc), "needs_phone": True}, status_code=403)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 async def state(request):
     try:
         phone = identity(request)
@@ -156,7 +208,7 @@ async def upload(request):
         return JSONResponse({"error":f"Upload failed: {exc}"},status_code=500)
 
 app = Starlette(debug=False,routes=[
- Route("/",index),Route("/api/chat",chat,methods=["POST"]),
+ Route("/",index),Route("/api/chat",chat,methods=["POST"]),Route("/api/chat/stream",chat_stream,methods=["POST"]),
  Route("/api/state",state),Route("/api/upload",upload,methods=["POST"]),
  Route("/api/identity",identity_status),Route("/api/register-phone",register_phone,methods=["POST"])])
 
