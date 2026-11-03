@@ -487,7 +487,8 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
                 "Answer the customer's latest question using only the settled profile and conversation below. "
                 "Do not invent financial facts, prices, availability or travel details. If the evidence is missing, "
                 "say what is unknown and ask one focused question.\n\n"
-                f"PROFILE:\n{wayfinder_tools._format_profile(profile)}\n\n"
+                f"TRIP PROFILE:\n{wayfinder_tools._format_profile(profile)}\n\n"
+                f"HOUSEHOLD FINANCIAL PROFILE:\n{format_household_financial_overview(household_financial_profile)}\n\n"
                 f"CONVERSATION:\n{interaction_agent._format_history(chat_history)}\n\n"
                 f"QUESTION: {text}"
             )
