@@ -1,3 +1,4 @@
+import mimetypes
 import os
 from pathlib import Path
 from uuid import UUID
@@ -6,7 +7,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
-from mesh.orchestrator import budget_engine, upload_links, wayfinder_session
+from mesh.orchestrator import budget_engine, trip_recap, upload_links, wayfinder_session
 
 STATIC = Path(__file__).with_name("static")
 MAX_UPLOAD = 15 * 1024 * 1024
@@ -45,18 +46,32 @@ async def state(request):
         return JSONResponse({"error":str(exc)}, status_code=400)
 
 async def upload(request):
+    """Handles both file types the chat upload link already supports
+    (mesh/orchestrator/upload_links.py's _upload_submit): a trip photo
+    (image/*) goes to trip_recap.handle_photo_upload - captioned once,
+    never run through the statement/OCR path; anything else is treated
+    as a document (PDF bank statement) through the existing extract +
+    budget_engine path below, unchanged."""
     try:
         phone = identity(request)
         form = await request.form()
         item = form.get("file")
         if item is None or not getattr(item,"filename",None):
-            return JSONResponse({"error":"Choose a PDF bank statement."},status_code=400)
+            return JSONResponse({"error":"Choose a file to upload."},status_code=400)
         filename = Path(item.filename).name
-        if Path(filename).suffix.lower() != ".pdf":
-            return JSONResponse({"error":"Please upload a PDF bank statement."},status_code=415)
         content = await item.read()
         if not content or len(content)>MAX_UPLOAD:
             return JSONResponse({"error":"File is empty or exceeds 15 MB."},status_code=413)
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        if mime_type and mime_type.startswith("image/"):
+            photo = await trip_recap.handle_photo_upload(phone, filename, content)
+            wayfinder_session.append_turn(phone,"customer","I uploaded a trip photo: "+filename)
+            wayfinder_session.append_turn(phone,"wayfinder","Got it - "+photo["caption"])
+            return JSONResponse({"status":"ok","filename":filename,"kind":"photo","caption":photo["caption"]})
+
+        if Path(filename).suffix.lower() != ".pdf":
+            return JSONResponse({"error":"Please upload a PDF bank statement or a photo (JPEG/PNG)."},status_code=415)
         outcome = await upload_links._extract_text(filename,content,None)
         if outcome["status"] != "ok":
             return JSONResponse({"status":outcome["status"],"error":outcome.get("error") or outcome["status"]},status_code=422)
@@ -72,7 +87,7 @@ async def upload(request):
         summary = wayfinder_session.format_household_financial_overview(profile)
         wayfinder_session.append_turn(phone,"customer","I uploaded the bank statement: "+filename)
         wayfinder_session.append_turn(phone,"wayfinder","Statement processed. "+summary)
-        return JSONResponse({"status":"ok","filename":filename,"summary":summary})
+        return JSONResponse({"status":"ok","filename":filename,"kind":"document","summary":summary})
     except Exception as exc:
         return JSONResponse({"error":f"Upload failed: {exc}"},status_code=500)
 
