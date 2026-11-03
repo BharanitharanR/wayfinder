@@ -217,8 +217,26 @@ this module, which talks to `https://api.meta.ai/v1` using the
 OpenAI-compatible SDK (Model API's own supported path). Nothing in
 Wayfinder's own code calls any other model provider.
 
----
+## Beyond this repo: reaching a broader audience over WhatsApp, via Adiyan
 
-*A live version of Wayfinder is already running and reachable over
-WhatsApp - if you'd like to try the real thing instead of (or alongside)
-running it yourself, just ask and I'll share how to reach it.*
+This standalone repo is Wayfinder running entirely on its own, exactly as
+described above - a browser UI or a terminal, no messaging platform, no
+larger system required.
+
+The author also runs this exact Wayfinder code as one vertical inside
+**Adiyan**, a personal AI-agent framework that already handles identity,
+message routing, and channel delivery for several assistants. Adiyan is
+what makes Wayfinder reachable over WhatsApp: its message handler calls
+straight into the same `wayfinder_session.handle_customer_message` entry
+point this repo's own browser UI and CLI call - no logic duplicated, no
+forked copy, same reasoning either way. Adiyan's WhatsApp connection
+itself runs over an unofficial web-automation layer rather than
+WhatsApp's official Business API, so it's only briefly shown in the demo
+video and isn't part of this repo.
+
+The point worth taking from this: Wayfinder's own design is
+channel-agnostic - chat text and uploaded documents/photos in, a reply
+out - so a browser, a terminal, or a messaging app are just different
+front doors onto the same agent. Wiring it to any other channel (a
+different messaging platform, an official Business API, a voice line)
+is the same shape of integration.
