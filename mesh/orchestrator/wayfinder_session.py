@@ -184,7 +184,7 @@ def format_household_financial_overview(profile: Optional[Dict[str, Any]]) -> st
             display_category = category.replace('_', ' ').title()
             lines.append(f'- {display_category}: {currency} {amount:,.2f}')
     lines.append('Transfers and investment contributions are separated from consumption expenses where the statement narration identifies them. Credit-card repayment overlap may still need confirmation.')
-    return '\\n'.join(lines)
+    return '\n'.join(lines)
 
 
 def _deterministic_budget_signal(profile: Dict[str, Any]) -> str:
