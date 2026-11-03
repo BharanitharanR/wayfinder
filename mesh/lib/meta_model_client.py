@@ -456,7 +456,18 @@ async def ask_tools(agent_id: str, stage: str, prompt: str, tools: list, system:
         except (json.JSONDecodeError, TypeError):
             args = {}
         calls.append({'name': tc.function.name, 'args': args, 'id': tc.id, 'type': 'tool_call'})
-    logged_response: Any = message.content or f'[tool_calls: {calls}]' if calls else (message.content or '')
+    # `A or B if C else D` parses as `A or (B if C else D)` - with
+    # message.content truthy (Muse Spark routinely narrates intent
+    # alongside a real tool call, not instead of one), this always
+    # short-circuited to just the text and silently dropped the
+    # tool_calls info from the log, regardless of whether a tool was
+    # actually selected. `calls` itself (what the real execution logic
+    # below runs on) was never affected - this only broke what got
+    # written to the log, confirmed live: a recommend_trip round logged
+    # as plain narration with no [tool_calls: ...] suffix turned out to
+    # have a real search_hotels call with real arguments, visible only
+    # in the NEXT round's "already made these tool calls" context.
+    logged_response: Any = f'{message.content or ""}\n[tool_calls: {calls}]' if calls else (message.content or '')
     usage = _usage_dict(response.usage)
     _record_usage(usage)
     llm_log.log_call(agent_id, stage, 'tools', f'meta:{model}', prompt, logged_response, usage=usage)
