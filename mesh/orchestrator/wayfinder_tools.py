@@ -337,7 +337,8 @@ def _format_profile(profile) -> str:
         f"- Preferences: {profile.preferences_summary or '(none stated)'}",
         f"- Budget: {profile.budget_signal or '(not grounded)'}",
         f"- From: {profile.origin_city or '(unknown)'}",
-        f"- To: {profile.destination_hint or ('open to discovery' if getattr(profile, 'destination_flexible', False) else '(unknown)')}",
+        f"- To: {profile.destination_hint or ('open to discovery' if getattr(profile, 'destination_flexible', False) else '(not selected)')}",
+        f"- Candidate destinations: {', '.join(getattr(profile, 'destination_options', []) or []) or '(none)' }",
         f"- When: {profile.travel_window or '(unknown)' }",
         f"- Destination flexibility: {'yes' if getattr(profile, 'destination_flexible', False) else 'no'}",
     ]
