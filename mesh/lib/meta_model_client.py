@@ -282,7 +282,7 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
         llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, None, error=str(e))
         raise
     text_parts: List[str] = []
-    sources: List[str] = []
+    sources: List[dict] = []
     for item in response.output:
         if getattr(item, 'type', None) != 'message':
             continue
@@ -291,11 +291,27 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
                 continue
             text_parts.append(block.text)
             for ann in (block.annotations or []):
-                if getattr(ann, 'type', None) == 'url_citation' and ann.url not in sources:
-                    sources.append(ann.url)
+                if getattr(ann, 'type', None) == 'url_citation':
+                    url = getattr(ann, 'url', None)
+                    if url and not any(source['url'] == url for source in sources):
+                        sources.append({
+                            'title': getattr(ann, 'title', None) or url,
+                            'url': url,
+                        })
     result = '\n'.join(text_parts).strip()
     if sources:
-        result += '\n\nSources: ' + ', '.join(sources)
+        result += '\n\nSources (web citations returned by Meta Search):\n'
+        result += '\n'.join(
+            f"[S{index}] {source['title']} — {source['url']}"
+            for index, source in enumerate(sources, start=1)
+        )
+        result += f"\nResearch retrieved: {__import__('datetime').datetime.now(__import__('datetime').timezone.utc).date().isoformat()} (UTC)"
+    else:
+        result += (
+            '\n\nResearch evidence warning: Meta Search returned no URL citations '
+            'for this response. Treat factual claims above as unverified; no '
+            'current prices, opening hours, availability, or travel times are confirmed.'
+        )
     usage = _usage_dict(response.usage)
     _record_usage(usage)
     llm_log.log_call(agent_id, stage, 'web', f'meta:{model}', task, result, usage=usage)
