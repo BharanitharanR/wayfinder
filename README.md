@@ -32,6 +32,13 @@ larger platform underneath it required.
 - Real tool calls behind the scenes: live flight search (Kiwi.com and
   LetsFG), live hotel search (Trivago), and live web search (Meta's own
   built-in search grounding) - all real, no mocked data.
+- Live planning visibility in the browser chat: the UI streams customer-safe
+  milestones for understanding, experience discovery, financial review,
+  transport, accommodation and recommendation preparation. It never exposes
+  raw prompts or private model reasoning. The backend accepts an optional
+  async progress callback so a host WhatsApp adapter can forward the same
+  milestone events to the customer; this standalone repository does not
+  contain the WhatsApp transport sender itself.
 - Real flight booking, with your explicit confirmation first: LetsFG's
   sandbox API books a real-shaped (fake-airline) flight end to end once
   you say yes to a specific offer - never automatically, and never from
