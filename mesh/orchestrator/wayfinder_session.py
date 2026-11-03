@@ -150,7 +150,7 @@ def _best_financial_profile(documents: List[Dict[str, Any]]) -> Optional[Dict[st
 
 
 def format_household_financial_overview(profile: Optional[Dict[str, Any]]) -> str:
-    \"\"\"Present statement-derived household cash flow without implying this is a full accounting product.\"\"\"
+    """Present statement-derived household cash flow without implying this is a full accounting product."""
     if not profile:
         return ('I do not have a readable financial statement yet. Upload a recent bank statement and I can '
                 'summarize verified income, categorized spending and monthly surplus for travel planning.')
@@ -166,7 +166,8 @@ def format_household_financial_overview(profile: Optional[Dict[str, Any]]) -> st
         if value is not None:
             lines.append(f'- {label}: {currency} {value:,.2f}')
     if profile.get('trustworthy'):
-        lines.append(f'- Average monthly surplus: {currency} {profile[\"average_monthly_surplus\"]:,.2f}')
+        average_surplus = profile.get('average_monthly_surplus')
+        lines.append(f'- Average monthly surplus: {currency} {average_surplus:,.2f}')
         conservative = profile.get('conservative_monthly_surplus_p25')
         median = profile.get('median_monthly_surplus')
         if median is not None:
@@ -180,7 +181,8 @@ def format_household_financial_overview(profile: Optional[Dict[str, Any]]) -> st
     if profile.get('classified_expense_totals'):
         lines.append('Classified spending across the statement:')
         for category, amount in sorted(profile['classified_expense_totals'].items(), key=lambda item: item[1], reverse=True):
-            lines.append(f'- {category.replace(\"_\", \" \").title()}: {currency} {amount:,.2f}')
+            display_category = category.replace('_', ' ').title()
+            lines.append(f'- {display_category}: {currency} {amount:,.2f}')
     lines.append('Transfers and investment contributions are separated from consumption expenses where the statement narration identifies them. Credit-card repayment overlap may still need confirmation.')
     return '\\n'.join(lines)
 
