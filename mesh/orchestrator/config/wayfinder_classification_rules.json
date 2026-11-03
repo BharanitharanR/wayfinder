@@ -1,14 +1,141 @@
 {
   "rules": [
-    {"contains": ["PAYROLL", "SALARY"], "category": "SALARY", "confidence": 0.95},
-    {"contains": ["RENT"], "category": "ESSENTIAL", "confidence": 0.95},
-    {"contains": ["SCHOOL", "TUITION", "FEE"], "category": "ESSENTIAL", "confidence": 0.9},
-    {"contains": ["HOME LOAN", "EMI", "LOAN"], "category": "OBLIGATION", "confidence": 0.85},
-    {"contains": ["ELECTRICITY", "WATER BILL", "GAS BILL", "TNEB", "BILLDESK"], "category": "ESSENTIAL", "confidence": 0.85},
-    {"contains": ["MOBILE", "BROADBAND", "RECHARGE", "AIRTEL", "JIO"], "category": "ESSENTIAL", "confidence": 0.85},
-    {"contains": ["FUEL", "PETROL", "INDIAN OIL"], "category": "ESSENTIAL", "confidence": 0.8},
-    {"contains": ["GROCERY", "SUPERMARKET", "DMART", "BIG BAZAAR", "RELIANCE FRESH"], "category": "ESSENTIAL", "confidence": 0.75},
-    {"contains": ["RESTAURANT", "CAFE", "PIZZA", "SWIGGY", "ZOMATO"], "category": "DISCRETIONARY", "confidence": 0.75},
-    {"contains": ["PHARMACY", "APOLLO", "MEDPLUS"], "category": "ESSENTIAL", "confidence": 0.75}
+    {
+      "contains": [
+        "PAYROLL",
+        "SALARY"
+      ],
+      "category": "SALARY",
+      "subcategory": "salary",
+      "confidence": 0.95
+    },
+    {
+      "contains": [
+        "BUSINESS INCOME",
+        "CLIENT PAYMENT"
+      ],
+      "category": "BUSINESS_INCOME",
+      "subcategory": "business_income",
+      "confidence": 0.9
+    },
+    {
+      "contains": [
+        "OWN ACCOUNT TRANSFER",
+        "SELF TRANSFER",
+        "SWEEP TRANSFER"
+      ],
+      "category": "TRANSFER",
+      "subcategory": "own_account_transfer",
+      "confidence": 0.95
+    },
+    {
+      "contains": [
+        "MUTUAL FUND",
+        "SIP",
+        "ZERODHA",
+        "GROWW",
+        "BROKERAGE",
+        "STOCK PURCHASE"
+      ],
+      "category": "INVESTMENT",
+      "subcategory": "investment_contribution",
+      "confidence": 0.9
+    },
+    {
+      "contains": [
+        "RENT"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "housing",
+      "confidence": 0.95
+    },
+    {
+      "contains": [
+        "SCHOOL",
+        "TUITION",
+        "FEE"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "education",
+      "confidence": 0.9
+    },
+    {
+      "contains": [
+        "HOME LOAN",
+        "EMI",
+        "LOAN"
+      ],
+      "category": "OBLIGATION",
+      "subcategory": "debt_repayment",
+      "confidence": 0.85
+    },
+    {
+      "contains": [
+        "ELECTRICITY",
+        "WATER BILL",
+        "GAS BILL",
+        "TNEB",
+        "BILLDESK"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "utilities",
+      "confidence": 0.85
+    },
+    {
+      "contains": [
+        "MOBILE",
+        "BROADBAND",
+        "RECHARGE",
+        "AIRTEL",
+        "JIO"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "telecommunications",
+      "confidence": 0.85
+    },
+    {
+      "contains": [
+        "FUEL",
+        "PETROL",
+        "INDIAN OIL"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "transport",
+      "confidence": 0.8
+    },
+    {
+      "contains": [
+        "GROCERY",
+        "SUPERMARKET",
+        "DMART",
+        "BIG BAZAAR",
+        "RELIANCE FRESH"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "groceries",
+      "confidence": 0.75
+    },
+    {
+      "contains": [
+        "RESTAURANT",
+        "CAFE",
+        "PIZZA",
+        "SWIGGY",
+        "ZOMATO"
+      ],
+      "category": "DISCRETIONARY",
+      "subcategory": "dining",
+      "confidence": 0.75
+    },
+    {
+      "contains": [
+        "PHARMACY",
+        "APOLLO",
+        "MEDPLUS"
+      ],
+      "category": "ESSENTIAL",
+      "subcategory": "healthcare",
+      "confidence": 0.75
+    }
   ]
 }
