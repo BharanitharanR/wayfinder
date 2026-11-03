@@ -57,6 +57,7 @@ class StatementTransaction(BaseModel):
 
 class StatementTransactions(BaseModel):
     currency: str = Field(description='The statement\'s currency, as a code if stated (e.g. INR, USD) or best inferred from symbols/context.')
+    closing_balance: Optional[float] = Field(default=None, description='Closing account balance only when explicitly present; this is not automatically disposable travel cash.')
     transactions: List[StatementTransaction] = Field(description='Every transaction line actually present in the statement text, in the order they appear. Do not invent, merge, or skip any row.')
 
 
