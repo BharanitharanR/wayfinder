@@ -325,7 +325,21 @@ def _format_profile(profile) -> str:
     return '\n'.join(lines)
 
 
-async def recommend_trip(profile) -> TripRecommendation:
+async def _emit_progress(progress_callback, stage: str, status: str, message: str) -> None:
+    """Send customer-safe milestones without exposing prompts or internal reasoning."""
+    if progress_callback is None:
+        return
+    try:
+        result = progress_callback({'type': 'stage_update', 'stage': stage,
+                                    'status': status, 'message': message})
+        if hasattr(result, '__await__'):
+            await result
+    except Exception:
+        # A disconnected UI must never break trip planning.
+        return
+
+
+async def recommend_trip(profile, progress_callback=None) -> TripRecommendation:
     """The actual "prescribe a trip" step, called once a CustomerSnapshot
     has nothing left in missing_info - a small, bounded ReAct loop (not
     Analysis Agent's full multi-turn one): up to 3 rounds of "choose one
@@ -345,6 +359,8 @@ async def recommend_trip(profile) -> TripRecommendation:
 
     # Start with divergent, interest-led experience discovery rather than
     # assuming the customer already knows which destination to search.
+    await _emit_progress(progress_callback, 'DISCOVERY', 'IN_PROGRESS',
+                         'Exploring destinations and experiences that match your family.')
     discovery, _ = await discover_experiences(profile)
     calls_so_far.append(f'[creative experience discovery]\\n{discovery}')
     evaluation = await evaluate_experience_research(profile, discovery)
@@ -352,6 +368,10 @@ async def recommend_trip(profile) -> TripRecommendation:
     if evaluation.next_search_task:
         follow_up = await meta_model_client.web_search(AGENT_ID, 'experience_research_replan', evaluation.next_search_task)
         calls_so_far.append(f'[targeted follow-up research: {evaluation.next_search_task}]\\n{follow_up}')
+    await _emit_progress(progress_callback, 'DISCOVERY', 'COMPLETED',
+                         'Experience research is complete; comparing the strongest directions.')
+    await _emit_progress(progress_callback, 'AFFORDABILITY', 'NEEDS_ATTENTION',
+                         'Reviewing your financial context. A safe total trip limit is not yet verified.')
 
     for _ in range(3):
         prompt = _RECOMMEND_PROMPT.format(
@@ -368,14 +388,34 @@ async def recommend_trip(profile) -> TripRecommendation:
         if tool_fn is None:
             calls_so_far.append(f'[{name}] unknown tool chosen - skipped.')
             continue
+        stage = ('TRANSPORT' if 'flight' in name.lower()
+                 else 'ACCOMMODATION' if 'hotel' in name.lower()
+                 else 'DISCOVERY')
+        stage_label = ('Searching for suitable flight options.' if stage == 'TRANSPORT'
+                       else 'Comparing family-friendly accommodation.' if stage == 'ACCOMMODATION'
+                       else 'Checking additional destination details.')
+        await _emit_progress(progress_callback, stage, 'IN_PROGRESS', stage_label)
         try:
             result = await tool_fn.ainvoke(args)
+            failed = isinstance(result, str) and (' failed:' in result.lower() or result.lower().startswith('failed:'))
         except Exception as e:
             result = f'failed: {describe_exception(e)}'
+            failed = True
+        message = ('The search could not be completed; the final answer will explain the limitation.'
+                   if failed else
+                   'Flight research is complete.' if stage == 'TRANSPORT' else
+                   'Accommodation research is complete.' if stage == 'ACCOMMODATION' else
+                   'Additional destination research is complete.')
+        await _emit_progress(progress_callback, stage, 'FAILED' if failed else 'COMPLETED', message)
         calls_so_far.append(f'[{name}({args})]\n{result}')
 
+    await _emit_progress(progress_callback, 'FINALIZING', 'IN_PROGRESS',
+                         'Bringing the research together into your trip recommendations.')
     final_prompt = _FINAL_RECOMMENDATION_PROMPT.format(
         profile_summary=profile_summary,
         calls_so_far='\n\n'.join(calls_so_far) if calls_so_far else '(no research calls were made)',
     )
-    return await meta_model_client.ask_schema(AGENT_ID, 'final_recommendation', final_prompt, TripRecommendation)
+    recommendation = await meta_model_client.ask_schema(AGENT_ID, 'final_recommendation', final_prompt, TripRecommendation)
+    await _emit_progress(progress_callback, 'FINALIZING', 'COMPLETED',
+                         'Your trip recommendations are ready.')
+    return recommendation
