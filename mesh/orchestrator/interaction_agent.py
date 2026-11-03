@@ -22,6 +22,7 @@ InteractionIntent = Literal[
     'NEW_TRIP',
     'MODIFY_TRIP',
     'ASK_QUESTION',
+    'ANALYZE_FINANCES',
     'EXPLORE_OPTIONS',
     'COMPARE_OPTIONS',
     'CONFIRM_ACTION',
@@ -82,7 +83,7 @@ class InteractionDecision(BaseModel):
 
 _INTERPRET_PROMPT = """You are the interaction interpreter for Wayfinder, a family travel-planning assistant.
 
-Interpret ONLY the customer's latest message in the context of the existing conversation and current trip profile.
+Interpret ONLY the customer's latest message in the context of the existing conversation and current trip profile. Wayfinder's core purpose is travel planning; financial analysis is a supporting capability used to establish safe travel affordability.
 
 CURRENT TRIP PROFILE:
 {profile_context}
@@ -96,6 +97,7 @@ LATEST CUSTOMER MESSAGE:
 Rules:
 - Distinguish a new trip from a modification to the current trip.
 - For a modification, preserve every known constraint the customer did not change. Example: if they change Goa to Kerala, retain dates, origin, family size, budget and preferences.
+- A question about income, expenses, monthly surplus, spending categories or the uploaded statement is ANALYZE_FINANCES, not a trip request.
 - A question about a recommendation is usually ASK_QUESTION, not a new trip.
 - Requests for alternatives or destination ideas are EXPLORE_OPTIONS.
 - Requests to compare named or previously returned options are COMPARE_OPTIONS.
