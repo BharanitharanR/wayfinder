@@ -470,6 +470,7 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         ) + f'Upload your documents here: {link}'
     else:
         profile = await infer_profile(chat_history, documents)
+        household_financial_profile = _best_financial_profile(documents)
 
         # Interpret each incoming turn against the settled profile before
         # choosing the next workflow. This routes questions separately from
@@ -477,7 +478,7 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         # destination discovery without discarding the other constraints.
         interaction = await interaction_agent.interpret_interaction(text, profile, chat_history)
         if interaction.intent == 'ANALYZE_FINANCES':
-            reply = format_household_financial_overview(_best_financial_profile(documents))
+            reply = format_household_financial_overview(household_financial_profile)
             append_turn(identity_key, 'wayfinder', reply)
             return reply
 
