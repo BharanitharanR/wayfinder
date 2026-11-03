@@ -475,7 +475,7 @@ async def _maybe_detect_trip_completion(identity_key: str, text: str, profile) -
     )
 
 
-async def handle_customer_message(chat_id: str, text: str) -> str:
+async def handle_customer_message(chat_id: str, text: str, *, upload_instruction: Optional[str] = None) -> str:
     """The actual intake/clarification loop - handle_message.py's new
     `vertical_id == 'wayfinder'` branch calls just this one function and
     uses its return value as the WhatsApp reply, the same shape every
@@ -501,6 +501,13 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
     family/leave info) is what drives the next question - that's fine
     there because it's being shown to the customer as a prompt, not
     branched on in code.
+
+    `upload_instruction`: overrides every "here's a link" reply below with
+    this exact text instead, and skips minting an upload_links token
+    entirely - for a caller (wayfinder_web.py) that already has its own
+    in-page upload control, so a separate browser link would be
+    redundant. None (the default, what WhatsApp's own caller uses) keeps
+    the original link-minting behavior unchanged.
     """
     confirmed_phone = upload_links.get_confirmed_phone(chat_id)
     identity_key = confirmed_phone or chat_id
@@ -536,12 +543,15 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         'uploaded the document', 'reuploaded', 're-uploaded',
     ))
     if upload_help:
-        link = upload_links.create_upload_link(
-            identity_key, require_phone_entry=(confirmed_phone is None))
-        reply = (
-            "Open this secure link, choose your bank-statement PDF, and submit it. "
-            "I'll confirm whether extraction and transaction analysis succeeded:\\n" + link
-        )
+        if upload_instruction is not None:
+            reply = upload_instruction
+        else:
+            link = upload_links.create_upload_link(
+                identity_key, require_phone_entry=(confirmed_phone is None))
+            reply = (
+                "Open this secure link, choose your bank-statement PDF, and submit it. "
+                "I'll confirm whether extraction and transaction analysis succeeded:\\n" + link
+            )
         append_turn(identity_key, 'wayfinder', reply)
         return reply
 
@@ -569,6 +579,8 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
                 f"I found your upload ({latest.get('filename', 'document')}), but processing status is "
                 f"{latest.get('status', 'unknown')}. {latest.get('error') or 'Please try the original PDF again.'}"
             )
+        elif upload_instruction is not None:
+            reply = "I don't see a completed upload for this chat yet. " + upload_instruction
         else:
             link = upload_links.create_upload_link(
                 identity_key, require_phone_entry=(confirmed_phone is None))
@@ -606,11 +618,14 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         # exists to replace. Once confirmed, every later link is minted
         # under the real number directly, so uploads never again land
         # under the WhatsApp id.
-        require_phone_entry = confirmed_phone is None
-        link = upload_links.create_upload_link(identity_key, require_phone_entry=require_phone_entry)
-        reply = (
-            f'{_GREETING_REPLY} ' if is_first_message else ''
-        ) + f'Upload your documents here: {link}'
+        if upload_instruction is not None:
+            reply = (f'{_GREETING_REPLY} ' if is_first_message else '') + upload_instruction
+        else:
+            require_phone_entry = confirmed_phone is None
+            link = upload_links.create_upload_link(identity_key, require_phone_entry=require_phone_entry)
+            reply = (
+                f'{_GREETING_REPLY} ' if is_first_message else ''
+            ) + f'Upload your documents here: {link}'
     else:
         profile = await infer_profile(chat_history, documents)
         household_financial_profile = _best_financial_profile(documents)

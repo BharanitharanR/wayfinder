@@ -20,8 +20,15 @@ larger platform underneath it required.
 
 ## What you'll have running
 
-- A terminal chat with Wayfinder (`wayfinder_dev_cli.py`) - type messages,
-  get replies, exactly like texting it.
+- Two ways to talk to Wayfinder - a browser UI (`wayfinder_web.py`) with
+  chat, drag-and-drop upload for both PDFs and photos, and a finance
+  panel, or a terminal chat (`wayfinder_dev_cli.py`) for scripting/fast
+  iteration. Both call the exact same backend.
+- A mandatory phone-number step before either one does anything - the
+  real phone number is the one piece of durable identity everything else
+  links by, the same requirement the WhatsApp upload page already
+  enforces. The web UI has its own in-page phone gate for this now; it
+  no longer sends you to a separate page to confirm it.
 - Real tool calls behind the scenes: live flight search (Kiwi.com and
   LetsFG), live hotel search (Trivago), and live web search (Meta's own
   built-in search grounding) - all real, no mocked data.
@@ -30,6 +37,11 @@ larger platform underneath it required.
   you say yes to a specific offer - never automatically, and never from
   inside the model's own tool-choice loop. See LETSFG_ENV in `.env.example`
   for what it takes to point this at real bookings instead.
+- A household cash-flow profile from an uploaded statement - average
+  income, essential/discretionary/obligation spend by category, and a
+  conservative (25th-percentile) monthly surplus figure, not just a
+  single average - deterministic arithmetic over Muse Spark's one
+  normalization call, same reasoning as the trip-cost figures below.
 - Trip recaps: upload photos during a trip, say you're back (or Wayfinder
   notices a flight/train selfie near your travel dates), and it drafts a
   blog-style recap page with your photos - published to a public,
@@ -89,6 +101,22 @@ OS.) No password, no setup beyond "make sure it's running" - Wayfinder
 talks to `mongodb://localhost:27017` by default.
 
 ## 4. Run Wayfinder
+
+### Option A - the browser UI (recommended)
+
+```bash
+bash start-wayfinder.sh
+```
+
+Opens `http://127.0.0.1:8765` automatically. First thing you'll see is a
+phone-number prompt (country code + digits) - that's mandatory, the same
+real-identity requirement WhatsApp enforces, just done in-page now
+instead of a separate link. After that: a chat pane, a **+** button in
+the composer bar to upload a bank statement PDF or trip photos directly
+(no separate page, multiple files at once), and a Finances tab that
+fills in once a statement's processed.
+
+### Option B - the terminal CLI
 
 ```bash
 python -m mesh.orchestrator.wayfinder_dev_cli
@@ -160,14 +188,18 @@ EXIF capture date spanning Dec 6-12, 2026, for exercising
   travel window's end date - triggers automatic trip-completion
   detection with no explicit "we're back" message needed.
 
-Upload these the same way as a statement, through Wayfinder's own upload
-link - not as a raw WhatsApp attachment, which gets redirected to that
-link instead of processed directly.
+Upload these the same way as a statement:
 
-When Wayfinder prints an upload link (first message, or `/link`), open it
-in a browser and upload either file - that's the real upload/extraction
-path (Muse Spark reading the PDF directly), not a shortcut, so the text
-Wayfinder reasons over is genuinely read from the file you give it.
+- **Web UI**: the **+** button in the composer bar takes both PDFs and
+  photos directly, multiple at once - no separate page.
+- **CLI**: use the upload link Wayfinder prints (first message, or
+  `/link`), open it in a browser, and upload there instead. Not as a raw
+  WhatsApp attachment, which gets redirected to that link rather than
+  processed directly.
+
+Either way, it's the real upload/extraction path (Muse Spark reading the
+file directly), not a shortcut, so what Wayfinder reasons over is
+genuinely read from the file you give it.
 
 ## Where the Meta model is actually called
 

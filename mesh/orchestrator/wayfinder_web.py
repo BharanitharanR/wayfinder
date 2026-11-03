@@ -1,5 +1,6 @@
 import mimetypes
 import os
+import re
 from pathlib import Path
 from uuid import UUID
 import uvicorn
@@ -12,14 +13,71 @@ from mesh.orchestrator import budget_engine, trip_recap, upload_links, wayfinder
 STATIC = Path(__file__).with_name("static")
 MAX_UPLOAD = 15 * 1024 * 1024
 
-def identity(request):
+# A dedicated in-UI phone-capture step, mirroring the WhatsApp upload
+# page's own mandatory field (upload_links.py's require_phone_entry) -
+# the real phone number is the one piece of durable identity Wayfinder
+# links everything by (see wayfinder_session.handle_customer_message's
+# own docstring); a random per-browser session id must never substitute
+# for it. The session id below is purely a lookup key into
+# upload_links.LINKS_COLLECTION's existing confirmed_phone mechanism -
+# the same one the WhatsApp upload page writes to - so once confirmed,
+# chat/upload here behave identically to a WhatsApp identity that's
+# already linked its real number.
+
+_UPLOAD_INSTRUCTION = "Use the ➕ button above to upload your bank statement or trip photos directly - no separate page needed."
+
+
+def session_id(request):
     try:
         return "wayfinder-web-" + str(UUID(request.headers.get("x-wayfinder-session", "")))
     except (ValueError, TypeError, AttributeError):
         raise ValueError("Invalid browser session. Refresh the page.")
 
+
+def identity(request):
+    """The resolved real identity for this request - the confirmed phone
+    number if this browser session has registered one, else raises (the
+    caller must register a phone before chat/upload do anything), never
+    silently falls back to the session id the way an earlier version of
+    this module did."""
+    sid = session_id(request)
+    confirmed = upload_links.get_confirmed_phone(sid)
+    if confirmed is None:
+        raise PermissionError("Please confirm your phone number first.")
+    return confirmed
+
 async def index(request):
     return HTMLResponse((STATIC / "index.html").read_text(encoding="utf-8"))
+
+async def register_phone(request):
+    try:
+        sid = session_id(request)
+        body = await request.json()
+        country_code = str(body.get("country_code", "")).strip()
+        digits = re.sub(r"\D", "", str(body.get("phone_digits", "")))
+        full_phone = country_code + digits
+        if not upload_links._PHONE_RE.match(full_phone):
+            return JSONResponse({"error":"Please enter a valid phone number."}, status_code=400)
+        from datetime import datetime, timezone
+        upload_links._db()[upload_links.LINKS_COLLECTION].update_one(
+            {"phone": sid},
+            {"$set": {"phone": sid, "confirmed_phone": full_phone, "require_phone_entry": True,
+                      "confirmed_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+        return JSONResponse({"status":"ok","phone":full_phone})
+    except ValueError as exc:
+        return JSONResponse({"error":str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error":f"Could not confirm phone number: {exc}"}, status_code=500)
+
+async def identity_status(request):
+    try:
+        sid = session_id(request)
+        confirmed = upload_links.get_confirmed_phone(sid)
+        return JSONResponse({"confirmed": confirmed is not None, "phone": confirmed})
+    except ValueError as exc:
+        return JSONResponse({"error":str(exc)}, status_code=400)
 
 async def chat(request):
     try:
@@ -27,8 +85,10 @@ async def chat(request):
         message = str((await request.json()).get("message", "")).strip()
         if not message:
             return JSONResponse({"error":"Message cannot be empty."}, status_code=400)
-        reply = await wayfinder_session.handle_customer_message(phone, message)
+        reply = await wayfinder_session.handle_customer_message(phone, message, upload_instruction=_UPLOAD_INSTRUCTION)
         return JSONResponse({"reply":reply})
+    except PermissionError as exc:
+        return JSONResponse({"error":str(exc),"needs_phone":True}, status_code=403)
     except ValueError as exc:
         return JSONResponse({"error":str(exc)}, status_code=400)
     except Exception as exc:
@@ -42,6 +102,8 @@ async def state(request):
         return JSONResponse({"documents":[{"filename":d.get("filename")} for d in docs],
           "financial_profile":profile,
           "financial_overview":wayfinder_session.format_household_financial_overview(profile)})
+    except PermissionError as exc:
+        return JSONResponse({"error":str(exc),"needs_phone":True}, status_code=403)
     except Exception as exc:
         return JSONResponse({"error":str(exc)}, status_code=400)
 
@@ -88,12 +150,15 @@ async def upload(request):
         wayfinder_session.append_turn(phone,"customer","I uploaded the bank statement: "+filename)
         wayfinder_session.append_turn(phone,"wayfinder","Statement processed. "+summary)
         return JSONResponse({"status":"ok","filename":filename,"kind":"document","summary":summary})
+    except PermissionError as exc:
+        return JSONResponse({"error":str(exc),"needs_phone":True}, status_code=403)
     except Exception as exc:
         return JSONResponse({"error":f"Upload failed: {exc}"},status_code=500)
 
 app = Starlette(debug=False,routes=[
  Route("/",index),Route("/api/chat",chat,methods=["POST"]),
- Route("/api/state",state),Route("/api/upload",upload,methods=["POST"])])
+ Route("/api/state",state),Route("/api/upload",upload,methods=["POST"]),
+ Route("/api/identity",identity_status),Route("/api/register-phone",register_phone,methods=["POST"])])
 
 if __name__ == "__main__":
     uvicorn.run("mesh.orchestrator.wayfinder_web:app",
