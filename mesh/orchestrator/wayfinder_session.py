@@ -509,24 +509,6 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
     documents = get_context_documents(identity_key)
     is_first_message = len(chat_history) <= 1
 
-    # Short product/help questions are answered directly. Do not turn
-    # an introductory question into mandatory travel intake.
-    lowered = text.strip().lower()
-    if any(phrase in lowered for phrase in (
-        'who is this for', 'who are you for', 'what do you do',
-        'what can you do', 'how do i use you', 'how to use you',
-        'how can i use you',
-    )):
-        reply = (
-            "I'm Wayfinder, a family travel-planning assistant. I help you explore "
-            "destinations, research flights and stays, build itineraries, and understand "
-            "what a trip may safely cost using your household cash-flow information. "
-            "You can start by telling me what kind of holiday you want, or upload a bank "
-            "statement when you're ready. You don't need to complete everything at once."
-        )
-        append_turn(identity_key, 'wayfinder', reply)
-        return reply
-
     # Handle operational upload questions deterministically before trip
     # intake. They must not trigger profile inference or trip completion.
     lowered = text.strip().lower()
