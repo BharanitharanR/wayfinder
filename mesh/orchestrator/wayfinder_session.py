@@ -57,14 +57,15 @@ class CustomerSnapshot(BaseModel):
     family_notes: str = Field(default='', description='Family composition details - ages, who travels. Leave-calendar specifics live in all_adults_leave_confirmed/family_size instead, not here.')
     budget_signal: str = Field(default='', description='A budget read grounded in any uploaded financial statement - a figure or range, not a guess with no basis.')
     origin_city: str = Field(default='', description='The city they would actually travel FROM, if stated. Empty if never mentioned - never guess one.')
-    destination_hint: str = Field(default='', description='A specific place name they want to go, if one was actually named - a vague style preference ("beaches", "mountains") does not count as a destination.')
-    destination_flexible: bool = Field(default=False, description='True only when the customer explicitly says they are open to destination suggestions or have no fixed destination. Never infer flexibility merely because destination_hint is empty.')
+    destination_hint: str = Field(default='', description='A single destination they have selected, if any. A shortlist belongs in destination_options.')
+    destination_options: List[str] = Field(default_factory=list, description='Named destinations the customer wants compared or is considering. These are candidates, not a final selection.')
+    destination_flexible: bool = Field(default=False, description='True only when the customer explicitly says they have no fixed destination and wants suggestions. A shortlist is not the same as having no preferences.')
     travel_window: str = Field(default='', description='Specific or rough travel dates/month actually stated (e.g. "mid December 2026", "first week of January"). Empty if never mentioned - never guess one.')
     has_female_traveler: Optional[bool] = Field(default=None, description='Whether an adult female (wife, mother, etc.) is among the people actually traveling, per family_notes. null until family composition is known at all.')
     last_period_start: str = Field(default='', description='Her last period start date (YYYY-MM-DD), ONLY if has_female_traveler is true and a date was actually given. Empty otherwise - never guess one.')
     average_cycle_length_days: Optional[int] = Field(default=None, description='Her average cycle length in days, ONLY if has_female_traveler is true and a number was actually given. None otherwise - never guess one.')
     has_kids: Optional[bool] = Field(default=None, description='Whether any children are among the people actually traveling, per family_notes. null until family composition is known at all.')
-    kids_school_calendar: str = Field(default='', description='School term dates/holiday windows for the traveling kids, ONLY if has_kids is true and this was actually given. Empty otherwise - never guess one.')
+    kids_school_calendar: str = Field(default='', description='School term dates/holiday windows, only when the customer volunteers them or asks Wayfinder to plan around the school calendar. A statement that the child is on holiday during the adult leave overlap is sufficient; do not demand exact term dates.')
     all_adults_leave_confirmed: Optional[bool] = Field(default=None, description="True once EVERY working adult traveler's leave/availability has been given as its own specific statement naming that person, however it reached this chat - the registered customer relaying it (\"my leave is Dec 10-20, and my wife is also free that same window\") is completely normal and counts, since only one phone number is ever actually chatting here. What does NOT count is one vague blanket statement with no one named individually (\"we're both free that month\") - that only confirms whoever it's specifically about. False/null if any working adult's own dates haven't been named at all yet.")
     missing_info: List[str] = Field(default_factory=list, description='Which required items are still missing or too thin to act on. A trip can only actually be searched for once ALL of these are satisfied: preferences_summary, family_size, a financial statement, origin_city, either destination_hint or explicit destination_flexible=true, travel_window, all_adults_leave_confirmed is true, and - only when applicable - (has_female_traveler true) last_period_start+average_cycle_length_days, and (has_kids true) kids_school_calendar. Phrase each missing item directly and plainly, e.g. "your wife\'s last period start date and average cycle length, so trip dates can avoid it", "your son\'s school term/holiday dates", "how many people are traveling in total", "your wife\'s own leave dates, not just yours".')
     summary: str = Field(default='', description='One short paragraph a planning step could read on its own, with no other context.')
@@ -80,9 +81,13 @@ _SNAPSHOT_PROMPT = """You are reading everything known so far about one Wayfinde
 
 Distill this into the customer's current profile. Only state what's actually supported by the text above - leave a field empty/null rather than guessing. For budget_signal, ground it in the uploaded statement text if present; don't invent a number. For origin_city, destination_hint, and travel_window, only fill these in if a specific city/place/date was actually stated - a mood or style ("beaches", "somewhere relaxing") is a preference, not a destination. Set destination_flexible=true ONLY when the customer explicitly invites Wayfinder to suggest destinations or says they have no fixed destination; otherwise false.
 
-Set has_female_traveler and has_kids from family composition as soon as that's known at all (true/false, not null) - while either is still null (family composition not yet known), don't request the fields that depend on it. Once has_female_traveler is true, last_period_start and average_cycle_length_days are required. Once has_kids is true, kids_school_calendar is required. all_adults_leave_confirmed is true once every working adult's leave was named specifically for them (the registered customer relaying "I'm free X, my wife is free X too" is normal and counts - only one person is ever actually chatting here); it's just a vague unnamed "we're both free" with no one named individually that doesn't count.
+Set has_female_traveler and has_kids from family composition as soon as known. NEVER ask for menstrual, period, fertility, or cycle information; it is not part of Wayfinder trip intake. School calendar details are optional: if the customer says the child is on holiday during the candidate travel period, accept that and do not ask for exact term dates. all_adults_leave_confirmed is true once every working adult's leave was named specifically for them.
 
-List in missing_info every one of the required items (see that field's own description) that's still missing or too thin to use - phrase each one directly and plainly, naming who or what it's actually about. A named destination is NOT required when destination_flexible=true; Wayfinder should discover destinations from the family's interests, origin, dates and financial constraints instead."""
+Capture every named candidate destination in destination_options when the customer asks to compare or is considering several places. Do not force them to select one before comparing. A destination shortlist is sufficient to perform a comparison; destination_hint is reserved for the destination they eventually choose.
+
+When every working adult's leave dates are stated, derive the overlapping available date range and put that overlap in travel_window. Do not ask for a separate travel window if it can be calculated from the named leave dates. If a date range is only a candidate window rather than confirmed trip dates, say so in summary.
+
+List only information genuinely needed for the NEXT useful action in missing_info. Comparing destinations can proceed with a shortlist, family composition and candidate date window even if the origin city is not yet known; if origin is unknown, qualify travel-time comparisons and ask for the departure city after giving useful initial comparison. Ask one focused question at a time. Never make the customer repeat information already stated."""
 
 
 _client: Optional[MongoClient] = None
@@ -629,6 +634,35 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
             append_turn(identity_key, 'wayfinder', reply)
             return reply
 
+        if interaction.intent == 'COMPARE_OPTIONS':
+            candidates = profile.destination_options
+            if not candidates:
+                # The interaction model may recognize the comparison request
+                # before profile extraction has captured its candidate list.
+                candidates = []
+            if candidates:
+                origin = profile.origin_city or 'departure city not yet provided'
+                window = profile.travel_window or 'dates not yet confirmed'
+                comparison = await meta_model_client.web_search(
+                    AGENT_ID, 'compare_destination_options',
+                    f"Compare these destinations for a family of {profile.family_size or 'unknown'} "
+                    f"({profile.family_notes or 'family composition not specified'}): "
+                    f"{', '.join(candidates)}. Candidate travel window: {window}. "
+                    f"Departure city: {origin}. Compare family experiences, seasonal suitability, "
+                    f"typical trip duration, indicative total family costs, and travel time. "
+                    f"If departure city is unknown, do not invent flight durations or routes; "
+                    f"give destination-side comparison and clearly state that travel time from origin "
+                    f"needs the departure city. Use current web research and distinguish estimates "
+                    f"from verified prices. Do not book anything."
+                )
+                follow_up = (
+                    "What city would you be traveling from? I can then make the travel-time comparison more precise."
+                    if not profile.origin_city else
+                    "Which destination would you like to explore further?"
+                )
+                reply = comparison + "\n\n" + follow_up
+                append_turn(identity_key, 'wayfinder', reply)
+                return reply
         if interaction.intent == 'EXPLORE_OPTIONS':
             profile.destination_flexible = True
             profile.missing_info = [
