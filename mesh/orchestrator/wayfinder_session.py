@@ -237,10 +237,11 @@ async def infer_profile(chat_history: List[Dict[str, Any]], documents: List[Dict
     financial_profile = _best_financial_profile(documents)
     if financial_profile is not None:
         snapshot.budget_signal = _deterministic_budget_signal(financial_profile)
+        # Low classification coverage is a confidence limitation, not a
+        # document-read failure. Keep the analysis available and do not
+        # repeatedly demand a manually supplied monthly surplus.
         budget_related = lambda item: any(kw in item.lower() for kw in ('budget', 'statement', 'financial', 'surplus'))
         snapshot.missing_info = [item for item in snapshot.missing_info if not budget_related(item)]
-        if not financial_profile.get('trustworthy'):
-            snapshot.missing_info.append('a confirmed monthly budget/surplus figure, since the uploaded statement could not be read confidently enough on its own')
 
     return snapshot
 
@@ -272,8 +273,10 @@ _GREETING_REPLY = (
 
 
 def _missing_info_reply(missing_info: List[str]) -> str:
-    items = ', '.join(missing_info)
-    return f"Thanks - to keep going, could you also share: {items}?"
+    # Keep the exchange conversational: ask for one actionable detail.
+    if not missing_info:
+        return "What would you like to plan?"
+    return f"To take the next step, could you tell me {missing_info[0].rstrip('.')}?"
 
 
 _RESEARCHING_PREFIX = "Got everything I need - let me find some real options for you.\n\n"
@@ -455,6 +458,59 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
     documents = get_context_documents(identity_key)
     is_first_message = len(chat_history) <= 1
 
+    # Handle operational upload questions deterministically before trip
+    # intake. They must not trigger profile inference or trip completion.
+    lowered = text.strip().lower()
+    upload_help = any(term in lowered for term in (
+        'how do i upload', 'how can i upload', 'way to upload', 'upload my bank',
+        'upload bank statement', 'where do i upload', 'upload the document',
+        'upload documents',
+    ))
+    upload_confirmation = any(term in lowered for term in (
+        'i uploaded', 'i have uploaded', 'uploaded the documents',
+        'uploaded the document', 'reuploaded', 're-uploaded',
+    ))
+    if upload_help:
+        link = upload_links.create_upload_link(
+            identity_key, require_phone_entry=(confirmed_phone is None))
+        reply = (
+            "Open this secure link, choose your bank-statement PDF, and submit it. "
+            "I'll confirm whether extraction and transaction analysis succeeded:\\n" + link
+        )
+        append_turn(identity_key, 'wayfinder', reply)
+        return reply
+
+    if upload_confirmation:
+        all_uploads = list(_db()[UPLOADS_COLLECTION].find(
+            {'phone': identity_key},
+            {'_id': 0, 'filename': 1, 'status': 1, 'financial_profile': 1,
+             'error': 1, 'uploaded_at': 1},
+        ).sort('uploaded_at', -1).limit(5))
+        successful = [item for item in all_uploads if item.get('status') == 'ok']
+        if successful:
+            financial = _best_financial_profile(get_context_documents(identity_key))
+            if financial is not None:
+                reply = "I can see your upload and have processed its financial data.\\n\\n" + format_household_financial_overview(financial)
+            else:
+                reply = (
+                    "I can see the uploaded document(s): " +
+                    ", ".join(item.get('filename', 'document') for item in successful[:3]) +
+                    ". Text extraction succeeded, but I don't yet have a bank-statement transaction profile. "
+                    "Please upload the original statement PDF if this was a bank statement."
+                )
+        elif all_uploads:
+            latest = all_uploads[0]
+            reply = (
+                f"I found your upload ({latest.get('filename', 'document')}), but processing status is "
+                f"{latest.get('status', 'unknown')}. {latest.get('error') or 'Please try the original PDF again.'}"
+            )
+        else:
+            link = upload_links.create_upload_link(
+                identity_key, require_phone_entry=(confirmed_phone is None))
+            reply = "I don't see a completed upload for this chat yet. Please submit it here: " + link
+        append_turn(identity_key, 'wayfinder', reply)
+        return reply
+
     if not documents:
         # A missing statement must not disable the conversational agent.
         # Interpret questions/help requests even before the first upload;
@@ -526,7 +582,16 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
                 if not any(term in item.lower() for term in ('destination', 'where to go', 'place to visit'))
             ]
 
-        recap_prompt_reply = await _maybe_detect_trip_completion(identity_key, text, profile)
+        # Completion detection is costly and only relevant when the
+        # customer actually reports that a trip has ended.
+        completion_language = any(term in lowered for term in (
+            'trip is over', 'trip is finished', 'we are back', 'we got back',
+            'returned from our trip', 'holiday is over', 'vacation is over',
+        ))
+        recap_prompt_reply = (
+            await _maybe_detect_trip_completion(identity_key, text, profile)
+            if completion_language else None
+        )
         if recap_prompt_reply is not None:
             append_turn(identity_key, 'wayfinder', recap_prompt_reply)
             return recap_prompt_reply
