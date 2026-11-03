@@ -456,6 +456,29 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
     is_first_message = len(chat_history) <= 1
 
     if not documents:
+        # A missing statement must not disable the conversational agent.
+        # Interpret questions/help requests even before the first upload;
+        # the previous early-return path made Wayfinder behave like a static
+        # upload-link generator until a document existed.
+        profile = await infer_profile(chat_history, documents)
+        interaction = await interaction_agent.interpret_interaction(text, profile, chat_history)
+        if interaction.intent == 'ANALYZE_FINANCES':
+            reply = format_household_financial_overview(None)
+            append_turn(identity_key, 'wayfinder', reply)
+            return reply
+        if interaction.intent == 'ASK_QUESTION':
+            answer_prompt = (
+                "Answer the customer's latest question about Wayfinder or their planning context. "
+                "Use the conversation and settled profile below. Do not invent financial facts, prices, "
+                "availability or travel details. If evidence is missing, explain what is needed.\n\n"
+                f"TRIP PROFILE:\n{wayfinder_tools._format_profile(profile)}\n\n"
+                f"CONVERSATION:\n{interaction_agent._format_history(chat_history)}\n\n"
+                f"QUESTION: {text}"
+            )
+            reply = await meta_model_client.ask_text(AGENT_ID, 'answer_customer_question', answer_prompt)
+            append_turn(identity_key, 'wayfinder', reply)
+            return reply
+
         # Before a phone is confirmed, the link has to be minted under
         # chat_id (confirmed_phone is None, so identity_key == chat_id
         # here too) - that's the only identity this contact has yet, and
