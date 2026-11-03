@@ -32,7 +32,7 @@ from typing import Any, List, Optional, Type
 
 import httpx
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from mesh.lib import llm_log
@@ -51,7 +51,7 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / '.env')
 BASE_URL = 'https://api.meta.ai/v1'
 DEFAULT_MODEL = os.environ.get('WAYFINDER_META_MODEL', 'muse-spark-1.3')
 
-_client: Optional[OpenAI] = None
+_client: Optional[AsyncOpenAI] = None
 
 
 class MetaModelError(RuntimeError):
@@ -94,13 +94,21 @@ def usage_snapshot() -> dict:
     return {'calls': _call_count, 'tokens': _token_total, 'max_calls': _MAX_CALLS or None, 'max_tokens': _MAX_TOKENS or None}
 
 
-def _get_client() -> OpenAI:
+def _get_client() -> AsyncOpenAI:
+    """AsyncOpenAI, not the synchronous OpenAI client - confirmed live
+    that calling the sync client's blocking network I/O from inside an
+    `async def` with no `await`/thread offload freezes the ENTIRE
+    uvicorn event loop for the full duration of each call (seconds to
+    well over a minute on a large prompt), during which the server can't
+    serve ANY other request, not even an unrelated Mongo lookup. That's
+    why wayfinder_web.py would go completely unresponsive - not hung on
+    one slow request, the whole single-threaded process was blocked."""
     global _client
     if _client is None:
         api_key = os.environ.get('MODEL_API_KEY')
         if not api_key:
             raise MetaModelError('MODEL_API_KEY is not set - get one from the Model API dashboard (dev.meta.ai) and export it.')
-        _client = OpenAI(base_url=BASE_URL, api_key=api_key)
+        _client = AsyncOpenAI(base_url=BASE_URL, api_key=api_key)
     return _client
 
 
@@ -157,7 +165,7 @@ async def extract_document_text(agent_id: str, stage: str, filename: str, conten
         ],
     }]
     try:
-        response = _get_client().chat.completions.create(model=model, messages=messages)
+        response = await _get_client().chat.completions.create(model=model, messages=messages)
     except Exception as e:
         llm_log.log_call(agent_id, stage, 'document', f'meta:{model}', f'[document: {filename}]', None, error=str(e))
         raise
@@ -187,7 +195,7 @@ async def ask_schema_with_file(agent_id: str, stage: str, prompt: str, filename:
         ],
     }]
     try:
-        response = _get_client().beta.chat.completions.parse(model=model, messages=messages, response_format=schema)
+        response = await _get_client().beta.chat.completions.parse(model=model, messages=messages, response_format=schema)
     except Exception as e:
         llm_log.log_call(agent_id, stage, 'schema_file', f'meta:{model}', f'[file: {filename}] {prompt}', None, error=str(e))
         raise
@@ -209,7 +217,7 @@ async def ask_text(agent_id: str, stage: str, prompt: str, system: Optional[str]
     messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
     model = DEFAULT_MODEL
     try:
-        response = _get_client().chat.completions.create(model=model, messages=messages)
+        response = await _get_client().chat.completions.create(model=model, messages=messages)
     except Exception as e:
         llm_log.log_call(agent_id, stage, 'text', f'meta:{model}', prompt, None, error=str(e))
         raise
@@ -230,7 +238,7 @@ async def ask_schema(agent_id: str, stage: str, prompt: str, schema: Type[BaseMo
     messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': prompt}]
     model = DEFAULT_MODEL
     try:
-        response = _get_client().beta.chat.completions.parse(model=model, messages=messages, response_format=schema)
+        response = await _get_client().beta.chat.completions.parse(model=model, messages=messages, response_format=schema)
     except Exception as e:
         llm_log.log_call(agent_id, stage, 'schema', f'meta:{model}', prompt, None, error=str(e))
         raise
@@ -275,7 +283,7 @@ async def web_search(agent_id: str, stage: str, task: str) -> str:
     _check_rate_limit()
     model = DEFAULT_MODEL
     try:
-        response = _get_client().responses.create(
+        response = await _get_client().responses.create(
             model=model, input=task, tools=[{'type': 'web_search'}],
         )
     except Exception as e:
@@ -331,7 +339,7 @@ async def generate_image(agent_id: str, stage: str, prompt: str, reference_image
         content.append({'type': 'input_image', 'image_url': data_url})
     model = 'muse-image-1.0'
     try:
-        response = _get_client().responses.create(
+        response = await _get_client().responses.create(
             model=model,
             input=[{'role': 'user', 'content': content}],
             tools=[{
@@ -436,7 +444,7 @@ async def ask_tools(agent_id: str, stage: str, prompt: str, tools: list, system:
     model = DEFAULT_MODEL
     function_defs = [_tool_to_function_def(t) for t in tools]
     try:
-        response = _get_client().chat.completions.create(model=model, messages=messages, tools=function_defs)
+        response = await _get_client().chat.completions.create(model=model, messages=messages, tools=function_defs)
     except Exception as e:
         llm_log.log_call(agent_id, stage, 'tools', f'meta:{model}', prompt, None, error=str(e))
         raise
