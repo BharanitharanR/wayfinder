@@ -102,7 +102,8 @@ Rules:
 - For ASK_QUESTION, the application will inspect the settled profile, conversation history and uploaded records before replying. Do not route a question into CONTINUE_INTAKE just because trip fields are missing.
 - A question about a recommendation is usually ASK_QUESTION, not a new trip.
 - Requests for alternatives or destination ideas are EXPLORE_OPTIONS.
-- Requests to compare named or previously returned options are COMPARE_OPTIONS.
+- Requests to compare named or previously returned options are COMPARE_OPTIONS, even if the customer is still providing trip details in the same message.
+- If the latest message names multiple candidate destinations and asks for a comparison, do not classify it as generic intake or PROVIDE_INFORMATION.
 - A clear yes/no about an existing specific pending action is CONFIRM_ACTION. A vague acknowledgement is not confirmation.
 - If the customer supplies missing profile details, use PROVIDE_INFORMATION and propose UPDATE_PROFILE or CONTINUE_INTAKE.
 - Never infer dates, party size, budget, destination, or consent.
@@ -125,6 +126,7 @@ def _format_profile(profile) -> str:
         'budget_signal',
         'origin_city',
         'destination_hint',
+        'destination_options',
         'travel_window',
         'missing_info',
     )
