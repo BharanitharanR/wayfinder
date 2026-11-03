@@ -72,9 +72,17 @@ def _is_statement_like(text: str) -> bool:
     on normalize_transactions. Not every uploaded document is a financial
     statement (a leave calendar, a school holiday list); this just avoids
     calling the model on ones that obviously aren't, by checking for the
-    shape money tables actually have (several decimal-money-looking
-    tokens plus at least one banking-ish keyword)."""
-    money_like = re.findall(r'\d{1,3}(?:,\d{2,3})*\.\d{2}', text)
+    shape money tables actually have (several grouped-digit money-looking
+    tokens plus at least one banking-ish keyword).
+
+    The decimal part (".00") is optional, not required - confirmed live
+    against a real statement reporting whole-rupee amounts ("145,000",
+    no paise) that the original decimal-mandatory version of this regex
+    wrongly rejected, sending back "no readable financial statement" for
+    a perfectly good upload. Still requires at least one thousands-
+    separator comma group, so a bare small number elsewhere in the text
+    doesn't inflate the count and cause a false positive."""
+    money_like = re.findall(r'\d{1,3}(?:,\d{2,3})+(?:\.\d{2})?', text)
     if len(money_like) < 5:
         return False
     lowered = text.lower()
