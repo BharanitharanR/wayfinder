@@ -149,6 +149,42 @@ def _best_financial_profile(documents: List[Dict[str, Any]]) -> Optional[Dict[st
     return candidates[0]['financial_profile']
 
 
+def format_household_financial_overview(profile: Optional[Dict[str, Any]]) -> str:
+    \"\"\"Present statement-derived household cash flow without implying this is a full accounting product.\"\"\"
+    if not profile:
+        return ('I do not have a readable financial statement yet. Upload a recent bank statement and I can '
+                'summarize verified income, categorized spending and monthly surplus for travel planning.')
+    currency = profile.get('currency') or ''
+    ratio = round(profile.get('classified_debit_ratio', 0) * 100)
+    months = profile.get('months_analyzed', 0)
+    lines = [f'Household cash-flow snapshot ({months} statement month(s), {ratio}% of relevant debits classified):']
+    for label, key in (('Average monthly verified income', 'average_monthly_income'),
+                       ('Average monthly essential expenses', 'average_monthly_essential_expenses'),
+                       ('Average monthly discretionary expenses', 'average_monthly_discretionary_expenses'),
+                       ('Average monthly obligations', 'average_monthly_obligations')):
+        value = profile.get(key)
+        if value is not None:
+            lines.append(f'- {label}: {currency} {value:,.2f}')
+    if profile.get('trustworthy'):
+        lines.append(f'- Average monthly surplus: {currency} {profile[\"average_monthly_surplus\"]:,.2f}')
+        conservative = profile.get('conservative_monthly_surplus_p25')
+        median = profile.get('median_monthly_surplus')
+        if median is not None:
+            lines.append(f'- Median monthly surplus: {currency} {median:,.2f}')
+        if conservative is not None:
+            lines.append(f'- Conservative monthly surplus (25th percentile): {currency} {conservative:,.2f}')
+        lines.append('This is a cash-flow estimate, not the amount automatically available for a holiday. A separate travel allocation must protect emergency savings and upcoming commitments.')
+    else:
+        lines.append('- Monthly surplus: not reliable enough to report.')
+        lines.append('Too much spending remains unclassified. I will not treat the remaining balance as disposable travel money.')
+    if profile.get('classified_expense_totals'):
+        lines.append('Classified spending across the statement:')
+        for category, amount in sorted(profile['classified_expense_totals'].items(), key=lambda item: item[1], reverse=True):
+            lines.append(f'- {category.replace(\"_\", \" \").title()}: {currency} {amount:,.2f}')
+    lines.append('Transfers and investment contributions are separated from consumption expenses where the statement narration identifies them. Credit-card repayment overlap may still need confirmation.')
+    return '\\n'.join(lines)
+
+
 def _deterministic_budget_signal(profile: Dict[str, Any]) -> str:
     surplus = profile.get('average_monthly_surplus')
     currency = profile.get('currency', '')
@@ -218,6 +254,7 @@ async def build_state(phone: str, chat_limit: int = 100) -> Dict[str, Any]:
         'phone': phone,
         'chat_history': chat_history,
         'documents': documents,
+        'household_financial_profile': _best_financial_profile(documents),
         'profile': snapshot,
     }
 
@@ -434,6 +471,11 @@ async def handle_customer_message(chat_id: str, text: str) -> str:
         # trip planning and lets an explicit request for ideas unlock
         # destination discovery without discarding the other constraints.
         interaction = await interaction_agent.interpret_interaction(text, profile, chat_history)
+        if interaction.intent == 'ANALYZE_FINANCES':
+            reply = format_household_financial_overview(_best_financial_profile(documents))
+            append_turn(identity_key, 'wayfinder', reply)
+            return reply
+
         if interaction.intent == 'ASK_QUESTION':
             answer_prompt = (
                 "Answer the customer's latest question using only the settled profile and conversation below. "
